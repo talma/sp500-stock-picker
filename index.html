@@ -192,7 +192,9 @@
         <div class="row"><span class="label">Gain</span><span class="num" data-field="gain">—</span></div>
         <div class="row"><span class="label">Final value</span><span class="num" data-field="finalValue">—</span></div>
         <div class="row"><span class="label">Trades</span><span class="num" data-field="trades">—</span></div>
+        <div class="subrow gain" data-field="benchmarkLead">Must outperform monthly investing.</div>
         <div class="subrow" data-field="parameters">—</div>
+        <div class="subrow" data-field="noQualifier" hidden>No searched rule outperformed monthly investing.</div>
         <button class="action-button" type="button" data-objective="minVolatility">Apply settings</button>
       </article>
       <article class="optimizer-card" id="optimizer-minTrades">
@@ -205,7 +207,7 @@
         <button class="action-button" type="button" data-objective="minTrades">Apply settings</button>
       </article>
     </div>
-    <div class="note">Volatility is the annualized standard deviation of monthly portfolio returns after removing each month’s contribution. Optimized results are in-sample and may overfit this historical window.</div>
+    <div class="note">Minimum volatility considers only rules whose after-fee, after-tax final value is strictly above monthly investing under the same assumptions. Volatility is the annualized standard deviation of monthly portfolio returns after removing each month’s contribution. Optimized results are in-sample and may overfit this historical window.</div>
   </section>
 
   <section class="cards" aria-label="Simulation results">
@@ -539,13 +541,16 @@ function buildGridCandidates(topValues,dipValues,gainValues,cooldownValues){
   return candidates;
 }
 
-function evaluateOptimizerCandidates(candidates,simulate){
+function evaluateOptimizerCandidates(candidates,simulate,monthlyFinalValue=-Infinity){
   const winners={maxGain:null,minVolatility:null,minTrades:null};
   candidates.forEach(parameters=>{
     const result=simulate(parameters);
     const candidate={parameters,result,gain:result.finalValue-result.invested};
     if(!winners.maxGain || candidate.gain>winners.maxGain.gain) winners.maxGain=candidate;
-    if(!winners.minVolatility || result.volatility<winners.minVolatility.result.volatility || (result.volatility===winners.minVolatility.result.volatility && candidate.gain>winners.minVolatility.gain)) winners.minVolatility=candidate;
+    if(result.finalValue>monthlyFinalValue){
+      candidate.beatsMonthlyBy=result.finalValue-monthlyFinalValue;
+      if(!winners.minVolatility || result.volatility<winners.minVolatility.result.volatility || (result.volatility===winners.minVolatility.result.volatility && candidate.gain>winners.minVolatility.gain)) winners.minVolatility=candidate;
+    }
     if(!winners.minTrades || result.trades<winners.minTrades.result.trades || (result.trades===winners.minTrades.result.trades && candidate.gain>winners.minTrades.gain)) winners.minTrades=candidate;
   });
   return winners;
@@ -571,7 +576,7 @@ function buildRefinementCandidates(seed){
   );
 }
 
-function mergeOptimizerWinners(current,next){
+function mergeOptimizerWinners(current,next,monthlyFinalValue){
   if(!current)return next;
   const byKey=new Map();
   [...Object.values(current),...Object.values(next)].forEach(candidate=>{
@@ -579,7 +584,7 @@ function mergeOptimizerWinners(current,next){
   });
   const candidates=[...byKey.values()];
   const resultByKey=new Map(candidates.map(candidate=>[candidateKey(candidate.parameters),candidate.result]));
-  return evaluateOptimizerCandidates(candidates.map(candidate=>candidate.parameters),parameters=>resultByKey.get(candidateKey(parameters)));
+  return evaluateOptimizerCandidates(candidates.map(candidate=>candidate.parameters),parameters=>resultByKey.get(candidateKey(parameters)),monthlyFinalValue);
 }
 
 function nextPaint(){return new Promise(resolve=>requestAnimationFrame(()=>resolve()));}
@@ -593,17 +598,18 @@ async function runOptimizer(){
   const readFloat=id=>parseFloat(document.getElementById(id).value);
   const assumptions={months:readInt('backtestMonths'),monthly:readInt('monthly'),mode:document.getElementById('weightMode').value,feePct:readFloat('feePct'),feeMin:readFloat('feeMin'),mmRate:readFloat('mmRate')};
   const simulate=parameters=>simulateStockPicker(assumptions.months,assumptions.monthly,parameters.topY,assumptions.mode,parameters.dipPct,parameters.gainPct,parameters.rebuyMonths,assumptions.feePct,assumptions.feeMin,assumptions.mmRate);
+  const monthlyFinalValue=simulateBenchmark(assumptions.months,assumptions.monthly,assumptions.feePct,assumptions.feeMin).dcaValue;
   const coarse=buildGridCandidates([1,5,10,15,20,30,40,50],[3,7,11,15,20,25],[5,15,25,35,45,60],[0,3,6,9,12]);
   let winners={maxGain:null,maxCagr:null,minTrades:null};let completed=0;
   try{
     for(let start=0;start<coarse.length;start+=40){
-      const batch=coarse.slice(start,start+40);winners=mergeOptimizerWinners(winners,evaluateOptimizerCandidates(batch,simulate));completed+=batch.length;
+      const batch=coarse.slice(start,start+40);winners=mergeOptimizerWinners(winners,evaluateOptimizerCandidates(batch,simulate,monthlyFinalValue),monthlyFinalValue);completed+=batch.length;
       progress.textContent=`Coarse search: ${completed.toLocaleString()} / ${coarse.length.toLocaleString()} strategies`;await nextPaint();
     }
     const refinement=[...new Map(collectObjectiveSeeds(winners).flatMap(buildRefinementCandidates).map(candidate=>[candidateKey(candidate),candidate])).values()];
     completed=0;
     for(let start=0;start<refinement.length;start+=40){
-      const batch=refinement.slice(start,start+40);winners=mergeOptimizerWinners(winners,evaluateOptimizerCandidates(batch,simulate));completed+=batch.length;
+      const batch=refinement.slice(start,start+40);winners=mergeOptimizerWinners(winners,evaluateOptimizerCandidates(batch,simulate,monthlyFinalValue),monthlyFinalValue);completed+=batch.length;
       progress.textContent=`Fine search: ${completed.toLocaleString()} / ${refinement.length.toLocaleString()} strategies`;await nextPaint();
     }
     optimizerWinners=winners;renderOptimizerResults(winners);
@@ -616,7 +622,17 @@ async function runOptimizer(){
 function renderOptimizerResults(winners){
   document.getElementById('optimizerResults').hidden=false;
   Object.entries(winners).forEach(([objective,candidate])=>{
-    const card=document.getElementById('optimizer-'+objective);const {result,parameters,gain}=candidate;
+    const card=document.getElementById('optimizer-'+objective);
+    if(!candidate){
+      card.querySelectorAll('[data-field="gain"],[data-field="finalValue"],[data-field="volatility"],[data-field="trades"],[data-field="parameters"]').forEach(field=>field.textContent='—');
+      const noQualifier=card.querySelector('[data-field="noQualifier"]');if(noQualifier)noQualifier.hidden=false;
+      const benchmarkLead=card.querySelector('[data-field="benchmarkLead"]');if(benchmarkLead)benchmarkLead.hidden=true;
+      card.querySelector('[data-objective]').disabled=true;return;
+    }
+    const {result,parameters,gain}=candidate;
+    const noQualifier=card.querySelector('[data-field="noQualifier"]');if(noQualifier)noQualifier.hidden=true;
+    const benchmarkLead=card.querySelector('[data-field="benchmarkLead"]');if(benchmarkLead){benchmarkLead.hidden=false;benchmarkLead.textContent=`Above monthly investing by ${fmt(candidate.beatsMonthlyBy)}`;}
+    card.querySelector('[data-objective]').disabled=false;
     card.querySelector('[data-field="gain"]').textContent=(gain>=0?'+':'')+fmt(gain);
     card.querySelector('[data-field="finalValue"]').textContent=fmt(result.finalValue);
     const cagrField=card.querySelector('[data-field="cagr"]');if(cagrField)cagrField.textContent=result.cagr.toFixed(1)+'%';

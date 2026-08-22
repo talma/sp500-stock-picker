@@ -9,7 +9,7 @@ A browser-based educational backtest comparing monthly investing, lump-sum inves
 - Configure dip sales, take-profit sales, rebuy cooldowns, fees, and idle-cash interest.
 - Apply a 25% tax to realized picker profits using average cost basis; losses receive no tax credit.
 - Review every ticker held during the period, with end-of-period holdings shown in bold.
-- Optimize rule parameters for maximum gain, minimum contribution-adjusted volatility, or minimum trades.
+- Optimize rule parameters for maximum gain, minimum trades, or minimum contribution-adjusted volatility among rules that outperform monthly investing.
 - Compare results with an equal-weight current-constituent benchmark proxy.
 
 ## Methodology warning
