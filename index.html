@@ -64,6 +64,8 @@
   .action-button.primary{background:var(--ink);color:var(--paper-light);padding:10px 16px}
   .action-button:disabled{cursor:wait;opacity:.55}
   .optimizer-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:4px 0 12px}
+  .disclosure-button{display:flex;align-items:center;gap:8px;border:0;background:transparent;color:var(--ink);padding:5px 0;font:700 11px/1 'Courier New',monospace;text-transform:uppercase;letter-spacing:.06em;cursor:pointer}
+  .disclosure-button .indicator{display:inline-block;width:1em;text-align:center}
   .optimizer-progress{font:12px/1.45 'Courier New',monospace;color:var(--ink-soft);font-variant-numeric:tabular-nums}
   .optimizer-results{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:28px}
   .optimizer-card{background:var(--paper-light);border:1px solid var(--rule);border-top:4px solid var(--picker);padding:16px;box-shadow:3px 3px 0 var(--shadow);min-width:0}
@@ -171,7 +173,11 @@
   </div>
 
   <section aria-labelledby="optimizerTitle">
-    <div class="section-title"><span id="optimizerTitle">Strategy optimizer</span><span class="source-tag">coarse-to-fine search</span></div>
+    <div class="section-title">
+      <span id="optimizerTitle">Strategy optimizer</span>
+      <button class="disclosure-button" id="optimizerToggle" type="button" aria-expanded="false" aria-controls="optimizerBody"><span class="indicator" aria-hidden="true">▸</span><span class="toggle-label">Show optimizer</span></button>
+    </div>
+    <div id="optimizerBody" hidden>
     <div class="optimizer-head">
       <div class="optimizer-progress" id="optimizerProgress" role="status" aria-live="polite">Searches top-stock count, dip threshold, gain threshold, and cooldown using the current assumptions.</div>
       <button class="action-button primary" id="runOptimizer" type="button" disabled>Run optimizer</button>
@@ -208,6 +214,7 @@
       </article>
     </div>
     <div class="note">Minimum volatility considers only rules whose after-fee, after-tax final value is strictly above monthly investing under the same assumptions. Volatility is the annualized standard deviation of monthly portfolio returns after removing each month’s contribution. Optimized results are in-sample and may overfit this historical window.</div>
+    </div>
   </section>
 
   <section class="cards" aria-label="Simulation results">
@@ -789,6 +796,12 @@ async function initialize(){
 
 ['monthly','backtestMonths','topY','rebuyMonths','mmRate','dipThreshold','gainThreshold','feePct','feeMin'].forEach(id=>document.getElementById(id).addEventListener('input',render));
 document.getElementById('weightMode').addEventListener('change',render);
+document.getElementById('optimizerToggle').addEventListener('click',event=>{
+  const button=event.currentTarget;const body=document.getElementById('optimizerBody');const expanded=button.getAttribute('aria-expanded')==='true';
+  button.setAttribute('aria-expanded',String(!expanded));body.hidden=expanded;
+  button.querySelector('.indicator').textContent=expanded?'▸':'▾';
+  button.querySelector('.toggle-label').textContent=expanded?'Show optimizer':'Hide optimizer';
+});
 document.getElementById('runOptimizer').addEventListener('click',runOptimizer);
 document.querySelectorAll('[data-objective]').forEach(button=>button.addEventListener('click',()=>applyOptimizerSettings(button.dataset.objective)));
 document.getElementById('chart').addEventListener('mousemove',showTooltip);
