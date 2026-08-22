@@ -186,14 +186,14 @@
         <div class="subrow" data-field="parameters">—</div>
         <button class="action-button" type="button" data-objective="maxGain">Apply settings</button>
       </article>
-      <article class="optimizer-card" id="optimizer-maxCagr">
-        <h3>Maximum CAGR</h3>
-        <div class="row"><span class="label">CAGR</span><span class="num" data-field="cagr">—</span></div>
+      <article class="optimizer-card" id="optimizer-minVolatility">
+        <h3>Minimum volatility</h3>
+        <div class="row"><span class="label">Annualized volatility</span><span class="num" data-field="volatility">—</span></div>
         <div class="row"><span class="label">Gain</span><span class="num" data-field="gain">—</span></div>
         <div class="row"><span class="label">Final value</span><span class="num" data-field="finalValue">—</span></div>
         <div class="row"><span class="label">Trades</span><span class="num" data-field="trades">—</span></div>
         <div class="subrow" data-field="parameters">—</div>
-        <button class="action-button" type="button" data-objective="maxCagr">Apply settings</button>
+        <button class="action-button" type="button" data-objective="minVolatility">Apply settings</button>
       </article>
       <article class="optimizer-card" id="optimizer-minTrades">
         <h3>Minimum trades</h3>
@@ -205,7 +205,7 @@
         <button class="action-button" type="button" data-objective="minTrades">Apply settings</button>
       </article>
     </div>
-    <div class="note">Maximum gain and maximum CAGR will normally select the same settings because the investment amount and backtest length remain fixed. Optimized results are in-sample and may overfit this historical window.</div>
+    <div class="note">Volatility is the annualized standard deviation of monthly portfolio returns after removing each month’s contribution. Optimized results are in-sample and may overfit this historical window.</div>
   </section>
 
   <section class="cards" aria-label="Simulation results">
@@ -388,6 +388,18 @@ function monthLabel(yearMonth){
 }
 function tradeFee(amount,feePct,feeMin){return amount>0?Math.max(amount*feePct/100,feeMin):0;}
 function safeCagr(finalValue,invested,years){return finalValue>0&&invested>0&&years>0?(Math.pow(finalValue/invested,1/years)-1)*100:0;}
+function contributionAdjustedVolatility(series,monthlyContribution){
+  if(series.length<2)return 0;
+  const returns=[];
+  for(let index=1;index<series.length;index++){
+    const previous=series[index-1];
+    if(previous>0)returns.push((series[index]-monthlyContribution)/previous-1);
+  }
+  if(returns.length<2)return 0;
+  const mean=returns.reduce((sum,value)=>sum+value,0)/returns.length;
+  const variance=returns.reduce((sum,value)=>sum+(value-mean)**2,0)/returns.length;
+  return Math.sqrt(variance)*Math.sqrt(12);
+}
 
 function simulateBenchmark(months,monthlyInvestment,feePct,feeMin){
   const rates=DATA.benchmarkReturns.slice(-months);
@@ -486,6 +498,7 @@ function simulateStockPicker(months,monthlyInvestment,topY,mode,dipPct,gainPct,r
   return {
     series,finalValue,invested,trades,feesPaid,interestEarned,cashBalance:cash,
     cagr:safeCagr(finalValue,invested,months/12),
+    volatility:contributionAdjustedVolatility(series,monthlyInvestment),
     holdingNames:Object.keys(holdings),holdingCount:Object.keys(holdings).length,
     selectedNames:ranked.map(item=>item.ticker)
   };
@@ -504,12 +517,12 @@ function buildGridCandidates(topValues,dipValues,gainValues,cooldownValues){
 }
 
 function evaluateOptimizerCandidates(candidates,simulate){
-  const winners={maxGain:null,maxCagr:null,minTrades:null};
+  const winners={maxGain:null,minVolatility:null,minTrades:null};
   candidates.forEach(parameters=>{
     const result=simulate(parameters);
     const candidate={parameters,result,gain:result.finalValue-result.invested};
     if(!winners.maxGain || candidate.gain>winners.maxGain.gain) winners.maxGain=candidate;
-    if(!winners.maxCagr || result.cagr>winners.maxCagr.result.cagr) winners.maxCagr=candidate;
+    if(!winners.minVolatility || result.volatility<winners.minVolatility.result.volatility || (result.volatility===winners.minVolatility.result.volatility && candidate.gain>winners.minVolatility.gain)) winners.minVolatility=candidate;
     if(!winners.minTrades || result.trades<winners.minTrades.result.trades || (result.trades===winners.minTrades.result.trades && candidate.gain>winners.minTrades.gain)) winners.minTrades=candidate;
   });
   return winners;
@@ -583,7 +596,8 @@ function renderOptimizerResults(winners){
     const card=document.getElementById('optimizer-'+objective);const {result,parameters,gain}=candidate;
     card.querySelector('[data-field="gain"]').textContent=(gain>=0?'+':'')+fmt(gain);
     card.querySelector('[data-field="finalValue"]').textContent=fmt(result.finalValue);
-    card.querySelector('[data-field="cagr"]').textContent=result.cagr.toFixed(1)+'%';
+    const cagrField=card.querySelector('[data-field="cagr"]');if(cagrField)cagrField.textContent=result.cagr.toFixed(1)+'%';
+    const volatilityField=card.querySelector('[data-field="volatility"]');if(volatilityField)volatilityField.textContent=(result.volatility*100).toFixed(1)+'%';
     card.querySelector('[data-field="trades"]').textContent=result.trades.toLocaleString();
     card.querySelector('[data-field="parameters"]').textContent=`Top ${parameters.topY} · dip −${parameters.dipPct}% · gain +${parameters.gainPct}% · cooldown ${parameters.rebuyMonths} mo · fees ${fmt(result.feesPaid)}`;
   });

@@ -7,7 +7,7 @@ A browser-based educational backtest comparing monthly investing, lump-sum inves
 - Select 1–50 top-ranked stocks.
 - Rank and weight by market capitalization, trailing-year average daily volume, or trailing-year performance.
 - Configure dip sales, take-profit sales, rebuy cooldowns, fees, and idle-cash interest.
-- Optimize rule parameters for maximum gain, maximum CAGR, or minimum trades.
+- Optimize rule parameters for maximum gain, minimum contribution-adjusted volatility, or minimum trades.
 - Compare results with an equal-weight current-constituent benchmark proxy.
 
 ## Methodology warning
