@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>S&amp;P 500 Ledger</title>
+<style>
+  :root{
+    --paper:#f3eddd; --paper-deep:#e9dfc6; --paper-light:#faf6eb;
+    --ink:#18382b; --ink-soft:#4b5d52; --rule:#c7b997;
+    --monthly:#007a53; --lump:#3168b2; --picker:#b84b3a;
+    --gain:#286847; --loss:#923b35; --focus:#1c6b93;
+    --shadow:rgba(62,48,24,.13);
+  }
+  *{box-sizing:border-box}
+  html{background:#dcd1b7}
+  body{
+    margin:0; min-height:100vh; padding:32px 20px 64px; color:var(--ink);
+    background:
+      linear-gradient(rgba(88,69,31,.035) 1px, transparent 1px) 0 0/100% 24px,
+      radial-gradient(circle at 16% 3%, rgba(255,255,255,.7), transparent 34%),
+      var(--paper);
+    font-family:Georgia,'Times New Roman',serif;
+  }
+  button,input,select{font:inherit}
+  .wrap{width:min(100%,980px);margin:auto}
+  .masthead{text-align:center;border-block:1px solid var(--ink);padding:8px 0;margin-bottom:24px}
+  .masthead-inner{border-block:3px double var(--ink);padding:22px 12px 18px}
+  .kicker{font:700 11px/1.2 'Courier New',monospace;letter-spacing:.2em;text-transform:uppercase;color:var(--ink-soft)}
+  h1{font-size:clamp(30px,6vw,52px);line-height:.95;letter-spacing:.045em;text-transform:uppercase;margin:9px 0 8px}
+  .dek{max-width:680px;margin:auto;color:var(--ink-soft);font-style:italic;font-size:14px}
+  .ledger-no{font:12px/1.4 'Courier New',monospace;letter-spacing:.08em;color:var(--ink-soft);margin-top:10px}
+  .status{display:flex;gap:12px;align-items:flex-start;margin:0 0 22px;padding:13px 15px;border:1px solid var(--rule);background:var(--paper-light);box-shadow:3px 3px 0 var(--shadow);font-size:13px;line-height:1.45}
+  .status::before{content:'●';font-size:12px;color:var(--lump);margin-top:1px}
+  .status.ready::before{color:var(--gain)}
+  .status.error{border-color:var(--loss);background:#f8e9df;color:#602822}
+  .status.error::before{color:var(--loss)}
+  .status code{font-family:'Courier New',monospace;background:rgba(255,255,255,.5);padding:1px 4px}
+  .note{background:rgba(233,223,198,.72);border:1px solid var(--rule);padding:12px 15px;font-size:12px;line-height:1.55;color:var(--ink-soft);margin-bottom:20px}
+  .note strong{color:var(--ink)}
+  .section-title{display:flex;justify-content:space-between;gap:16px;align-items:end;border-bottom:3px double var(--ink);padding-bottom:8px;margin:30px 0 14px;text-transform:uppercase;letter-spacing:.08em;font-size:16px}
+  .source-tag{font:700 9px/1 'Courier New',monospace;letter-spacing:.08em;color:var(--gain);border:1px solid var(--gain);padding:3px 6px;white-space:nowrap}
+  .controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--rule);border:1px solid var(--rule);margin-bottom:16px;box-shadow:4px 4px 0 var(--shadow)}
+  .control{background:var(--paper-deep);padding:17px 20px;min-width:0}
+  .control label{display:block;font-size:11px;line-height:1.3;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-soft);margin-bottom:7px}
+  .value{font:700 22px/1.1 'Courier New',monospace;margin-bottom:9px;font-variant-numeric:tabular-nums}
+  input[type=range]{width:100%;accent-color:var(--ink);cursor:pointer}
+  select{width:100%;padding:9px 10px;border:1px solid var(--rule);border-radius:0;background:var(--paper-light);color:var(--ink)}
+  input:focus-visible,select:focus-visible,button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+  fieldset:disabled{opacity:.55}
+  fieldset{border:0;padding:0;margin:0;min-width:0}
+  .cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:18px 0 28px;position:relative}
+  .card{background:var(--paper-light);border:1px solid var(--rule);padding:17px 18px;box-shadow:3px 3px 0 var(--shadow);min-width:0}
+  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;margin:0 0 13px;border-bottom:1px solid var(--rule);padding-bottom:8px}
+  .row{display:flex;justify-content:space-between;gap:12px;font:13px/1.4 'Courier New',monospace;padding:3px 0}
+  .row .label{color:var(--ink-soft)} .row .num{font-weight:700;text-align:right;font-variant-numeric:tabular-nums}
+  .gain{color:var(--gain)} .loss{color:var(--loss)}
+  .subrow{font-size:11px;line-height:1.5;color:var(--ink-soft);border-top:1px solid var(--rule);margin-top:9px;padding-top:8px;overflow-wrap:anywhere}
+  .stamp{position:absolute;right:-8px;top:-16px;z-index:2;transform:rotate(-5deg);border:3px solid var(--lump);color:var(--lump);background:rgba(243,237,221,.92);padding:6px 11px;font:700 12px/1 'Courier New',monospace;text-transform:uppercase;letter-spacing:.08em}
+  .chart-frame{background:var(--paper-light);border:1px solid var(--rule);padding:18px 20px 14px;box-shadow:4px 4px 0 var(--shadow);margin-bottom:24px}
+  .chart-head{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:10px}
+  .chart-head h2{margin:0;font-size:15px;text-transform:uppercase;letter-spacing:.08em}
+  .table-toggle,.action-button{border:1px solid var(--ink);background:transparent;color:var(--ink);padding:7px 10px;font:700 11px/1 'Courier New',monospace;text-transform:uppercase;letter-spacing:.04em;cursor:pointer}
+  .action-button.primary{background:var(--ink);color:var(--paper-light);padding:10px 16px}
+  .action-button:disabled{cursor:wait;opacity:.55}
+  .optimizer-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:4px 0 12px}
+  .optimizer-progress{font:12px/1.45 'Courier New',monospace;color:var(--ink-soft);font-variant-numeric:tabular-nums}
+  .optimizer-results{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:28px}
+  .optimizer-card{background:var(--paper-light);border:1px solid var(--rule);border-top:4px solid var(--picker);padding:16px;box-shadow:3px 3px 0 var(--shadow);min-width:0}
+  .optimizer-card h3{font-size:13px;text-transform:uppercase;letter-spacing:.08em;margin:0 0 10px}
+  .optimizer-card .action-button{width:100%;margin-top:12px}
+  #legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--ink-soft);margin-bottom:8px}
+  #legend span{display:flex;align-items:center;gap:6px}.swatch{width:18px;height:3px;display:inline-block}.dash{background:repeating-linear-gradient(90deg,currentColor 0 5px,transparent 5px 8px)}
+  .plot{position:relative;height:320px;min-height:220px}
+  #chart{display:block;width:100%;height:100%}
+  #chartTooltip{position:absolute;pointer-events:none;display:none;z-index:5;background:var(--ink);color:var(--paper-light);padding:8px 10px;font:11px/1.55 'Courier New',monospace;box-shadow:3px 3px 0 rgba(0,0,0,.18);white-space:nowrap}
+  .table-wrap{display:none;overflow:auto;max-height:380px;margin-top:14px;border-top:1px solid var(--rule)}
+  .table-wrap.open{display:block}
+  table{width:100%;border-collapse:collapse;font:11px/1.3 'Courier New',monospace}
+  th,td{padding:7px 9px;border-bottom:1px solid var(--rule);text-align:right;white-space:nowrap}th:first-child,td:first-child{text-align:left}th{position:sticky;top:0;background:var(--paper-deep)}
+  .footnote{font-size:11px;line-height:1.6;color:var(--ink-soft);border-top:3px double var(--ink);padding-top:14px}
+  [hidden]{display:none!important}
+  @media(max-width:760px){.cards,.optimizer-results{grid-template-columns:1fr}.controls{grid-template-columns:1fr}.stamp{position:static;grid-column:1;justify-self:start;margin-bottom:-4px}.plot{height:270px}.chart-head,.optimizer-head{align-items:flex-start;flex-direction:column}}
+  @media(max-width:480px){body{padding:16px 10px 42px}.control,.card,.chart-frame{padding-inline:13px}.row{font-size:12px}.section-title{align-items:start;flex-direction:column}.plot{height:240px}}
+  @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+  @media(forced-colors:active){.swatch{border:1px solid CanvasText}.card,.chart-frame,.status{box-shadow:none}}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header class="masthead">
+    <div class="masthead-inner">
+      <div class="kicker">Portfolio research desk · current-constituent edition</div>
+      <h1>The S&amp;P 500 Ledger</h1>
+      <p class="dek">Dollar-cost averaging, lump sum, and a rule-based stock picker tested against the same downloaded monthly record.</p>
+      <div class="ledger-no" id="dataRangeLabel">DATA WINDOW: LOADING…</div>
+    </div>
+  </header>
+
+  <div class="status" id="dataStatus" role="status" aria-live="polite">Loading <code>sp500_monthly_prices_10yr.csv</code> and <code>sp500_top50_rankings.csv</code>…</div>
+
+  <div class="note">
+    <strong>Method note.</strong> The benchmark is an equal-weight proxy built from available monthly returns for the current S&amp;P 500 constituents—not the official index. Adjusted prices reflect splits and distributions where Yahoo provides them. Current membership and current ranking snapshots are applied backward through the downloaded window, introducing survivorship and look-ahead bias. This is an educational backtest, not financial advice.
+  </div>
+
+  <fieldset id="simulatorControls" disabled>
+    <div class="section-title"><span>Shared assumptions</span><span class="source-tag">downloaded CSV data</span></div>
+    <div class="controls">
+      <div class="control">
+        <label for="backtestMonths">Backtest length, ending <span id="endMonthLabel">—</span></label>
+        <div class="value"><span id="backtestMonthsVal">—</span> mo</div>
+        <input type="range" id="backtestMonths" min="12" max="120" step="1" value="60">
+      </div>
+      <div class="control">
+        <label for="monthly">Monthly investment</label>
+        <div class="value">$<span id="monthlyVal">500</span></div>
+        <input type="range" id="monthly" min="50" max="5000" step="50" value="500">
+      </div>
+      <div class="control">
+        <label for="feePct">Trading fee (% of trade value)</label>
+        <div class="value"><span id="feePctVal">0.08</span>%</div>
+        <input type="range" id="feePct" min="0" max="1" step="0.01" value="0.08">
+      </div>
+      <div class="control">
+        <label for="feeMin">Minimum fee per trade</label>
+        <div class="value">$<span id="feeMinVal">1.00</span></div>
+        <input type="range" id="feeMin" min="0" max="10" step="0.5" value="1">
+      </div>
+    </div>
+
+    <div class="section-title"><span>Rule-based stock picker</span><span class="source-tag">ranked top 50</span></div>
+    <div class="controls">
+      <div class="control">
+        <label for="topY">Top stocks to include</label>
+        <div class="value"><span id="topYVal">10</span></div>
+        <input type="range" id="topY" min="1" max="50" step="1" value="10">
+      </div>
+      <div class="control">
+        <label for="weightMode">Select and weight stocks by</label>
+        <select id="weightMode">
+          <option value="value">Market capitalization</option>
+          <option value="volume">Trailing-year average daily volume</option>
+          <option value="performance">Trailing-year performance</option>
+        </select>
+      </div>
+      <div class="control">
+        <label for="rebuyMonths">Rebuy cooldown (months)</label>
+        <div class="value"><span id="rebuyMonthsVal">3</span></div>
+        <input type="range" id="rebuyMonths" min="0" max="12" step="1" value="3">
+      </div>
+      <div class="control">
+        <label for="mmRate">Idle cash rate (annual %)</label>
+        <div class="value"><span id="mmRateVal">5.0</span>%</div>
+        <input type="range" id="mmRate" min="0" max="10" step="0.1" value="5">
+      </div>
+      <div class="control">
+        <label for="dipThreshold">Dip sell threshold</label>
+        <div class="value">−<span id="dipThresholdVal">10</span>%</div>
+        <input type="range" id="dipThreshold" min="3" max="25" step="1" value="10">
+      </div>
+      <div class="control">
+        <label for="gainThreshold">Take-profit threshold</label>
+        <div class="value">+<span id="gainThresholdVal">20</span>%</div>
+        <input type="range" id="gainThreshold" min="5" max="60" step="1" value="20">
+      </div>
+    </div>
+  </fieldset>
+
+  <div class="note">
+    Each ranking mode selects its own top N universe and uses that metric for allocation. Each month, a held stock that falls beyond the dip threshold or rises beyond the take-profit threshold is sold; moderate declines receive new capital. Empty eligible slots are filled in ranking order. Missing prices are skipped and their allocation is redistributed among stocks with valid data.
+  </div>
+
+  <section aria-labelledby="optimizerTitle">
+    <div class="section-title"><span id="optimizerTitle">Strategy optimizer</span><span class="source-tag">coarse-to-fine search</span></div>
+    <div class="optimizer-head">
+      <div class="optimizer-progress" id="optimizerProgress" role="status" aria-live="polite">Searches top-stock count, dip threshold, gain threshold, and cooldown using the current assumptions.</div>
+      <button class="action-button primary" id="runOptimizer" type="button" disabled>Run optimizer</button>
+    </div>
+    <div class="optimizer-results" id="optimizerResults" hidden>
+      <article class="optimizer-card" id="optimizer-maxGain">
+        <h3>Maximum gain</h3>
+        <div class="row"><span class="label">Gain</span><span class="num" data-field="gain">—</span></div>
+        <div class="row"><span class="label">Final value</span><span class="num" data-field="finalValue">—</span></div>
+        <div class="row"><span class="label">CAGR</span><span class="num" data-field="cagr">—</span></div>
+        <div class="row"><span class="label">Trades</span><span class="num" data-field="trades">—</span></div>
+        <div class="subrow" data-field="parameters">—</div>
+        <button class="action-button" type="button" data-objective="maxGain">Apply settings</button>
+      </article>
+      <article class="optimizer-card" id="optimizer-maxCagr">
+        <h3>Maximum CAGR</h3>
+        <div class="row"><span class="label">CAGR</span><span class="num" data-field="cagr">—</span></div>
+        <div class="row"><span class="label">Gain</span><span class="num" data-field="gain">—</span></div>
+        <div class="row"><span class="label">Final value</span><span class="num" data-field="finalValue">—</span></div>
+        <div class="row"><span class="label">Trades</span><span class="num" data-field="trades">—</span></div>
+        <div class="subrow" data-field="parameters">—</div>
+        <button class="action-button" type="button" data-objective="maxCagr">Apply settings</button>
+      </article>
+      <article class="optimizer-card" id="optimizer-minTrades">
+        <h3>Minimum trades</h3>
+        <div class="row"><span class="label">Trades</span><span class="num" data-field="trades">—</span></div>
+        <div class="row"><span class="label">Gain</span><span class="num" data-field="gain">—</span></div>
+        <div class="row"><span class="label">Final value</span><span class="num" data-field="finalValue">—</span></div>
+        <div class="row"><span class="label">CAGR</span><span class="num" data-field="cagr">—</span></div>
+        <div class="subrow" data-field="parameters">—</div>
+        <button class="action-button" type="button" data-objective="minTrades">Apply settings</button>
+      </article>
+    </div>
+    <div class="note">Maximum gain and maximum CAGR will normally select the same settings because the investment amount and backtest length remain fixed. Optimized results are in-sample and may overfit this historical window.</div>
+  </section>
+
+  <section class="cards" aria-label="Simulation results">
+    <div class="stamp" id="stamp" hidden></div>
+    <article class="card">
+      <h2>Monthly investing</h2>
+      <div class="row"><span class="label">Total invested</span><span class="num" id="dcaInvested">—</span></div>
+      <div class="row"><span class="label">Final value</span><span class="num" id="dcaFinal">—</span></div>
+      <div class="row"><span class="label">Gain / loss</span><span class="num" id="dcaGain">—</span></div>
+      <div class="row"><span class="label">CAGR</span><span class="num" id="dcaCagr">—</span></div>
+    </article>
+    <article class="card">
+      <h2>Lump sum on day one</h2>
+      <div class="row"><span class="label">Total invested</span><span class="num" id="lsInvested">—</span></div>
+      <div class="row"><span class="label">Final value</span><span class="num" id="lsFinal">—</span></div>
+      <div class="row"><span class="label">Gain / loss</span><span class="num" id="lsGain">—</span></div>
+      <div class="row"><span class="label">CAGR</span><span class="num" id="lsCagr">—</span></div>
+    </article>
+    <article class="card">
+      <h2>Rule-based stock picker</h2>
+      <div class="row"><span class="label">Total invested</span><span class="num" id="rbInvested">—</span></div>
+      <div class="row"><span class="label">Final value</span><span class="num" id="rbFinal">—</span></div>
+      <div class="row"><span class="label">Gain / loss</span><span class="num" id="rbGain">—</span></div>
+      <div class="row"><span class="label">CAGR</span><span class="num" id="rbCagr">—</span></div>
+      <div class="subrow" id="rbDetail">Waiting for data.</div>
+      <div class="subrow" id="rbHoldings">&nbsp;</div>
+    </article>
+  </section>
+
+  <section class="chart-frame" aria-labelledby="chartTitle">
+    <div class="chart-head">
+      <h2 id="chartTitle">Portfolio value over time</h2>
+      <button class="table-toggle" id="tableToggle" type="button" aria-expanded="false" aria-controls="dataTableWrap">Show table</button>
+    </div>
+    <div id="legend" aria-label="Chart legend">
+      <span><i class="swatch" style="background:var(--monthly)"></i>Monthly investing</span>
+      <span><i class="swatch dash" style="color:var(--lump)"></i>Lump sum</span>
+      <span><i class="swatch dash" style="color:var(--picker)"></i>Rule-based picker</span>
+    </div>
+    <div class="plot" id="plot">
+      <canvas id="chart" role="img" aria-label="Portfolio value line chart comparing three investment strategies"></canvas>
+      <div id="chartTooltip" role="tooltip"></div>
+    </div>
+    <div class="table-wrap" id="dataTableWrap">
+      <table>
+        <thead><tr><th>Month</th><th>Monthly investing</th><th>Lump sum</th><th>Stock picker</th></tr></thead>
+        <tbody id="dataTableBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="footnote">
+    CAGR compares final value with total new capital and annualizes it over the selected window. For contribution strategies this is a simplified comparison rather than an internal rate of return. The benchmark equally averages valid constituent returns each month, so its membership and coverage can vary when data is missing. Past performance does not predict future results.
+  </footer>
+</main>
+
+<script>
+'use strict';
+
+const PRICE_FILE = 'sp500_monthly_prices_10yr.csv';
+const RANKING_FILE = 'sp500_top50_rankings.csv';
+const RANKING_BY_MODE = {
+  value: 'market_cap',
+  volume: 'average_daily_volume',
+  performance: 'one_year_return'
+};
+const SERIES_STYLE = [
+  {key:'dca', color:'#007a53', dash:[]},
+  {key:'lump', color:'#3168b2', dash:[8,5]},
+  {key:'picker', color:'#b84b3a', dash:[3,4]}
+];
+const DATA = {months:[], prices:{}, rankings:{}, benchmarkReturns:[]};
+let latestChart = null;
+let resizeFrame = null;
+let optimizerWinners = null;
+let optimizerRunning = false;
+
+function parseCSV(text){
+  const rows=[]; let row=[]; let field=''; let quoted=false;
+  for(let i=0;i<text.length;i++){
+    const char=text[i];
+    if(quoted){
+      if(char==='"' && text[i+1]==='"'){field+='"';i++;}
+      else if(char==='"'){quoted=false;}
+      else{field+=char;}
+    }else if(char==='"'){quoted=true;}
+    else if(char===','){row.push(field);field='';}
+    else if(char==='\n'){row.push(field.replace(/\r$/,''));rows.push(row);row=[];field='';}
+    else{field+=char;}
+  }
+  if(field.length || row.length){row.push(field.replace(/\r$/,''));rows.push(row);}
+  return rows.filter(values=>values.some(value=>value!==''));
+}
+
+function parsePriceData(text){
+  const rows=parseCSV(text);
+  if(rows.length<3) throw new Error('The price CSV has too few rows.');
+  const tickers=rows[0].slice(1).map(value=>value.trim());
+  const months=[];
+  const prices=Object.fromEntries(tickers.map(ticker=>[ticker,[]]));
+  rows.slice(1).forEach(row=>{
+    if(!row[0]) return;
+    months.push(row[0].slice(0,7));
+    tickers.forEach((ticker,index)=>{
+      const value=Number(row[index+1]);
+      prices[ticker].push(Number.isFinite(value) && value>0 ? value : null);
+    });
+  });
+  return {months,prices};
+}
+
+function parseRankingData(text){
+  const rows=parseCSV(text);
+  const header=rows[0]||[];
+  const criterionIndex=header.indexOf('criterion');
+  const rankIndex=header.indexOf('rank');
+  const tickerIndex=header.indexOf('ticker');
+  const valueIndex=header.indexOf('value');
+  if([criterionIndex,rankIndex,tickerIndex,valueIndex].some(index=>index<0)){
+    throw new Error('The ranking CSV must contain criterion, rank, ticker, and value columns.');
+  }
+  const rankings={};
+  rows.slice(1).forEach(row=>{
+    const criterion=row[criterionIndex];
+    const ticker=(row[tickerIndex]||'').trim();
+    const value=Number(row[valueIndex]);
+    const rank=Number(row[rankIndex]);
+    if(!criterion || !ticker || !Number.isFinite(value)) return;
+    (rankings[criterion] ||= []).push({ticker,value,rank});
+  });
+  Object.values(rankings).forEach(items=>items.sort((a,b)=>a.rank-b.rank));
+  return rankings;
+}
+
+function buildEqualWeightBenchmark(prices, months){
+  const series=Object.values(prices);
+  const returns=[];
+  for(let monthIndex=1;monthIndex<months.length;monthIndex++){
+    const validReturns=series
+      .map(values=>{
+        const previous=values[monthIndex-1];
+        const current=values[monthIndex];
+        return previous>0 && current>0 ? current/previous-1 : null;
+      })
+      .filter(Number.isFinite);
+    returns.push(validReturns.length ? validReturns.reduce((sum,value)=>sum+value,0)/validReturns.length : 0);
+  }
+  return returns;
+}
+
+async function fetchText(path){
+  const response=await fetch(path,{cache:'no-store'});
+  if(!response.ok) throw new Error(`${path} returned HTTP ${response.status}.`);
+  return response.text();
+}
+
+async function loadData(){
+  if(window.location.protocol === 'file:'){
+    throw new Error('Local CSV files cannot be loaded from file://. Run python3 -m http.server 8000, then open http://localhost:8000/sp500_simulator.html.');
+  }
+  const [priceText,rankingText]=await Promise.all([fetchText(PRICE_FILE),fetchText(RANKING_FILE)]);
+  const parsedPrices=parsePriceData(priceText);
+  const rankings=parseRankingData(rankingText);
+  const missing=Object.values(RANKING_BY_MODE).filter(criterion=>!rankings[criterion]?.length);
+  if(missing.length) throw new Error(`Ranking CSV is missing: ${missing.join(', ')}.`);
+  DATA.months=parsedPrices.months;
+  DATA.prices=parsedPrices.prices;
+  DATA.rankings=rankings;
+  DATA.benchmarkReturns=buildEqualWeightBenchmark(DATA.prices,DATA.months);
+  if(DATA.months.length<13) throw new Error('At least 13 monthly observations are required.');
+}
+
+function fmt(value){
+  if(!Number.isFinite(value)) return '—';
+  return value.toLocaleString('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0});
+}
+function monthLabel(yearMonth){
+  const [year,month]=yearMonth.split('-').map(Number);
+  return new Intl.DateTimeFormat('en-US',{month:'short',year:'numeric',timeZone:'UTC'}).format(new Date(Date.UTC(year,month-1,1)));
+}
+function tradeFee(amount,feePct,feeMin){return amount>0?Math.max(amount*feePct/100,feeMin):0;}
+function safeCagr(finalValue,invested,years){return finalValue>0&&invested>0&&years>0?(Math.pow(finalValue/invested,1/years)-1)*100:0;}
+
+function simulateBenchmark(months,monthlyInvestment,feePct,feeMin){
+  const rates=DATA.benchmarkReturns.slice(-months);
+  const years=months/12;
+  const lumpTotal=monthlyInvestment*months;
+  let dcaValue=0;
+  let lumpValue=lumpTotal-tradeFee(lumpTotal,feePct,feeMin);
+  const dcaSeries=[]; const lumpSeries=[];
+  rates.forEach(rate=>{
+    dcaValue=(dcaValue+monthlyInvestment-tradeFee(monthlyInvestment,feePct,feeMin))*(1+rate);
+    lumpValue*=1+rate;
+    dcaSeries.push(dcaValue); lumpSeries.push(lumpValue);
+  });
+  return {
+    dcaSeries,lumpSeries,dcaValue,lumpValue,
+    invested:monthlyInvestment*months,lumpTotal,
+    dcaCagr:safeCagr(dcaValue,monthlyInvestment*months,years),
+    lumpCagr:safeCagr(lumpValue,lumpTotal,years)
+  };
+}
+
+function selectedUniverse(mode,topY){
+  const criterion=RANKING_BY_MODE[mode];
+  const rankings=DATA.rankings;
+  return (rankings[criterion]||[])
+    .filter(item=>DATA.prices[item.ticker])
+    .slice(0, topY);
+}
+
+function metricWeights(items){
+  const positives=items.map(item=>Math.max(0,item.value));
+  const total=positives.reduce((sum,value)=>sum+value,0);
+  return total>0?positives.map(value=>value/total):items.map(()=>1/items.length);
+}
+
+function simulateStockPicker(months,monthlyInvestment,topY,mode,dipPct,gainPct,rebuyMonths,feePct,feeMin,mmRate){
+  const criterion=RANKING_BY_MODE[mode];
+  const ranked=selectedUniverse(mode,topY);
+  const start=DATA.months.length-months-1;
+  const holdings={}; const cooldown={};
+  let cash=0; let trades=0; let feesPaid=0; let interestEarned=0;
+  const monthlyRate=Math.pow(1+mmRate/100,1/12)-1;
+  const series=[];
+
+  for(let index=start+1;index<DATA.months.length;index++){
+    const interest=cash*monthlyRate; cash+=interest; interestEarned+=interest; cash+=monthlyInvestment;
+    Object.keys(cooldown).forEach(ticker=>{cooldown[ticker]-=1;if(cooldown[ticker]<=0)delete cooldown[ticker];});
+    const buyTargets=[];
+
+    ranked.forEach(item=>{
+      const ticker=item.ticker;
+      const current=DATA.prices[ticker][index];
+      const previous=DATA.prices[ticker][index-1];
+      if(!(current>0&&previous>0)) return;
+      if(holdings[ticker]){
+        const change=current/previous-1;
+        if(change < -dipPct/100 || change > gainPct/100){
+          const proceeds=holdings[ticker].shares*current;
+          const fee=tradeFee(proceeds,feePct,feeMin);
+          cash+=Math.max(0,proceeds-fee);feesPaid+=fee;delete holdings[ticker];cooldown[ticker]=rebuyMonths;trades++;
+        }else if(change<0){buyTargets.push(item);}
+      }
+    });
+
+    const emptySlots=ranked.filter(item=>{
+      const ticker=item.ticker;
+      return !holdings[ticker]&&!cooldown[ticker]&&!buyTargets.some(target=>target.ticker===ticker)&&DATA.prices[ticker][index]>0;
+    });
+    const eligible=[...buyTargets,...emptySlots];
+    if(eligible.length&&cash>0){
+      const weights=metricWeights(eligible);
+      const available=cash;
+      eligible.forEach((item,itemIndex)=>{
+        const amount=available*weights[itemIndex];
+        const fee=tradeFee(amount,feePct,feeMin);
+        const net=Math.max(0,amount-fee);
+        if(net<=0)return;
+        const ticker=item.ticker;
+        holdings[ticker] ||= {shares:0};
+        holdings[ticker].shares+=net/DATA.prices[ticker][index];
+        feesPaid+=fee;trades++;
+      });
+      cash=0;
+    }
+
+    let value=cash;
+    Object.entries(holdings).forEach(([ticker,holding])=>{
+      const price=DATA.prices[ticker][index];
+      if(price>0)value+=holding.shares*price;
+    });
+    series.push(value);
+  }
+
+  const invested=monthlyInvestment*months;
+  const finalValue=series.at(-1)||0;
+  return {
+    series,finalValue,invested,trades,feesPaid,interestEarned,cashBalance:cash,
+    cagr:safeCagr(finalValue,invested,months/12),
+    holdingNames:Object.keys(holdings),holdingCount:Object.keys(holdings).length,
+    selectedNames:ranked.map(item=>item.ticker)
+  };
+}
+
+function candidateKey(parameters){
+  return [parameters.topY,parameters.dipPct,parameters.gainPct,parameters.rebuyMonths].join(':');
+}
+
+function buildGridCandidates(topValues,dipValues,gainValues,cooldownValues){
+  const candidates=[];
+  topValues.forEach(topY=>dipValues.forEach(dipPct=>gainValues.forEach(gainPct=>cooldownValues.forEach(rebuyMonths=>{
+    candidates.push({topY,dipPct,gainPct,rebuyMonths});
+  }))));
+  return candidates;
+}
+
+function evaluateOptimizerCandidates(candidates,simulate){
+  const winners={maxGain:null,maxCagr:null,minTrades:null};
+  candidates.forEach(parameters=>{
+    const result=simulate(parameters);
+    const candidate={parameters,result,gain:result.finalValue-result.invested};
+    if(!winners.maxGain || candidate.gain>winners.maxGain.gain) winners.maxGain=candidate;
+    if(!winners.maxCagr || result.cagr>winners.maxCagr.result.cagr) winners.maxCagr=candidate;
+    if(!winners.minTrades || result.trades<winners.minTrades.result.trades || (result.trades===winners.minTrades.result.trades && candidate.gain>winners.minTrades.gain)) winners.minTrades=candidate;
+  });
+  return winners;
+}
+
+function collectObjectiveSeeds(winners){
+  const seen=new Set();
+  return Object.values(winners).filter(candidate=>{
+    if(!candidate)return false;
+    const key=candidateKey(candidate.parameters);
+    if(seen.has(key))return false;
+    seen.add(key);return true;
+  }).map(candidate=>candidate.parameters);
+}
+
+function buildRefinementCandidates(seed){
+  const values=(center,offsets,min,max)=>[...new Set(offsets.map(offset=>Math.max(min,Math.min(max,center+offset))))];
+  return buildGridCandidates(
+    values(seed.topY,[-2,-1,0,1,2],1,50),
+    values(seed.dipPct,[-2,-1,0,1,2],3,25),
+    values(seed.gainPct,[-4,-2,0,2,4],5,60),
+    values(seed.rebuyMonths,[-2,-1,0,1,2],0,12)
+  );
+}
+
+function mergeOptimizerWinners(current,next){
+  if(!current)return next;
+  const byKey=new Map();
+  [...Object.values(current),...Object.values(next)].forEach(candidate=>{
+    if(candidate)byKey.set(candidateKey(candidate.parameters),candidate);
+  });
+  const candidates=[...byKey.values()];
+  const resultByKey=new Map(candidates.map(candidate=>[candidateKey(candidate.parameters),candidate.result]));
+  return evaluateOptimizerCandidates(candidates.map(candidate=>candidate.parameters),parameters=>resultByKey.get(candidateKey(parameters)));
+}
+
+function nextPaint(){return new Promise(resolve=>requestAnimationFrame(()=>resolve()));}
+
+async function runOptimizer(){
+  if(optimizerRunning||!DATA.months.length)return;
+  optimizerRunning=true;
+  const button=document.getElementById('runOptimizer');const progress=document.getElementById('optimizerProgress');
+  button.disabled=true;button.textContent='Optimizing…';
+  const readInt=id=>parseInt(document.getElementById(id).value,10);
+  const readFloat=id=>parseFloat(document.getElementById(id).value);
+  const assumptions={months:readInt('backtestMonths'),monthly:readInt('monthly'),mode:document.getElementById('weightMode').value,feePct:readFloat('feePct'),feeMin:readFloat('feeMin'),mmRate:readFloat('mmRate')};
+  const simulate=parameters=>simulateStockPicker(assumptions.months,assumptions.monthly,parameters.topY,assumptions.mode,parameters.dipPct,parameters.gainPct,parameters.rebuyMonths,assumptions.feePct,assumptions.feeMin,assumptions.mmRate);
+  const coarse=buildGridCandidates([1,5,10,15,20,30,40,50],[3,7,11,15,20,25],[5,15,25,35,45,60],[0,3,6,9,12]);
+  let winners={maxGain:null,maxCagr:null,minTrades:null};let completed=0;
+  try{
+    for(let start=0;start<coarse.length;start+=40){
+      const batch=coarse.slice(start,start+40);winners=mergeOptimizerWinners(winners,evaluateOptimizerCandidates(batch,simulate));completed+=batch.length;
+      progress.textContent=`Coarse search: ${completed.toLocaleString()} / ${coarse.length.toLocaleString()} strategies`;await nextPaint();
+    }
+    const refinement=[...new Map(collectObjectiveSeeds(winners).flatMap(buildRefinementCandidates).map(candidate=>[candidateKey(candidate),candidate])).values()];
+    completed=0;
+    for(let start=0;start<refinement.length;start+=40){
+      const batch=refinement.slice(start,start+40);winners=mergeOptimizerWinners(winners,evaluateOptimizerCandidates(batch,simulate));completed+=batch.length;
+      progress.textContent=`Fine search: ${completed.toLocaleString()} / ${refinement.length.toLocaleString()} strategies`;await nextPaint();
+    }
+    optimizerWinners=winners;renderOptimizerResults(winners);
+    progress.textContent=`Optimization complete · ${coarse.length+refinement.length} strategies tested with current assumptions.`;
+  }finally{
+    optimizerRunning=false;button.disabled=false;button.textContent='Run optimizer';
+  }
+}
+
+function renderOptimizerResults(winners){
+  document.getElementById('optimizerResults').hidden=false;
+  Object.entries(winners).forEach(([objective,candidate])=>{
+    const card=document.getElementById('optimizer-'+objective);const {result,parameters,gain}=candidate;
+    card.querySelector('[data-field="gain"]').textContent=(gain>=0?'+':'')+fmt(gain);
+    card.querySelector('[data-field="finalValue"]').textContent=fmt(result.finalValue);
+    card.querySelector('[data-field="cagr"]').textContent=result.cagr.toFixed(1)+'%';
+    card.querySelector('[data-field="trades"]').textContent=result.trades.toLocaleString();
+    card.querySelector('[data-field="parameters"]').textContent=`Top ${parameters.topY} · dip −${parameters.dipPct}% · gain +${parameters.gainPct}% · cooldown ${parameters.rebuyMonths} mo · fees ${fmt(result.feesPaid)}`;
+  });
+}
+
+function applyOptimizerSettings(objective){
+  const parameters=optimizerWinners?.[objective]?.parameters;if(!parameters)return;
+  document.getElementById('topY').value=parameters.topY;
+  document.getElementById('dipThreshold').value=parameters.dipPct;
+  document.getElementById('gainThreshold').value=parameters.gainPct;
+  document.getElementById('rebuyMonths').value=parameters.rebuyMonths;
+  render();
+  document.getElementById('optimizerTitle').scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+function setMetric(prefix,invested,finalValue,cagr){
+  document.getElementById(prefix+'Invested').textContent=fmt(invested);
+  document.getElementById(prefix+'Final').textContent=fmt(finalValue);
+  const gain=finalValue-invested;
+  const gainElement=document.getElementById(prefix+'Gain');
+  gainElement.textContent=(gain>=0?'+':'')+fmt(gain);
+  gainElement.className='num '+(gain>=0?'gain':'loss');
+  document.getElementById(prefix+'Cagr').textContent=(Number.isFinite(cagr)?cagr:0).toFixed(1)+'%';
+}
+
+function drawChart(){
+  if(!latestChart)return;
+  const canvas=document.getElementById('chart');
+  const plot=document.getElementById('plot');
+  const ratio=Math.min(window.devicePixelRatio||1,2);
+  const width=Math.max(300,plot.clientWidth); const height=Math.max(220,plot.clientHeight);
+  canvas.width=width*ratio;canvas.height=height*ratio;canvas.style.width=width+'px';canvas.style.height=height+'px';
+  const context=canvas.getContext('2d');context.scale(ratio,ratio);context.clearRect(0,0,width,height);
+  const margin={top:18,right:18,bottom:36,left:62};
+  const chartWidth=width-margin.left-margin.right;const chartHeight=height-margin.top-margin.bottom;
+  const allValues=[...latestChart.dca,...latestChart.lump,...latestChart.picker].filter(Number.isFinite);
+  const maximum=Math.max(...allValues,1)*1.08;
+  const x=index=>margin.left+(latestChart.labels.length===1?0:index/(latestChart.labels.length-1))*chartWidth;
+  const y=value=>margin.top+chartHeight-(value/maximum)*chartHeight;
+
+  context.font="11px 'Courier New'";context.fillStyle='#4b5d52';context.strokeStyle='#d8ccb0';context.lineWidth=1;
+  for(let step=0;step<=4;step++){
+    const value=maximum*step/4;const py=y(value);
+    context.beginPath();context.moveTo(margin.left,py);context.lineTo(width-margin.right,py);context.stroke();
+    context.textAlign='right';context.textBaseline='middle';context.fillText('$'+Math.round(value/1000)+'k',margin.left-9,py);
+  }
+  const tickEvery=Math.max(1,Math.ceil(latestChart.labels.length/6));
+  latestChart.labels.forEach((label,index)=>{
+    if(index%tickEvery!==0&&index!==latestChart.labels.length-1)return;
+    context.textAlign=index===latestChart.labels.length-1?'right':'center';context.textBaseline='top';
+    context.fillText(monthLabel(label),x(index),height-margin.bottom+10);
+  });
+  SERIES_STYLE.forEach(style=>{
+    const values=latestChart[style.key];context.strokeStyle=style.color;context.lineWidth=2;context.setLineDash(style.dash);context.beginPath();
+    values.forEach((value,index)=>{if(!Number.isFinite(value))return;const px=x(index),py=y(value);index===0?context.moveTo(px,py):context.lineTo(px,py);});
+    context.stroke();context.setLineDash([]);
+    const last=values.length-1;if(last>=0){context.fillStyle=style.color;context.beginPath();context.arc(x(last),y(values[last]),4,0,Math.PI*2);context.fill();}
+  });
+  latestChart.geometry={margin,chartWidth,chartHeight,x,y,width,height};
+}
+
+function updateTable(){
+  const body=document.getElementById('dataTableBody');body.textContent='';
+  latestChart.labels.forEach((label,index)=>{
+    const row=document.createElement('tr');
+    [monthLabel(label),fmt(latestChart.dca[index]),fmt(latestChart.lump[index]),fmt(latestChart.picker[index])].forEach(value=>{const cell=document.createElement('td');cell.textContent=value;row.appendChild(cell);});
+    body.appendChild(row);
+  });
+}
+
+function showTooltip(event){
+  if(!latestChart?.geometry)return;
+  const rect=event.currentTarget.getBoundingClientRect();
+  const localX=event.clientX-rect.left;
+  const {margin,chartWidth}=latestChart.geometry;
+  const position=Math.max(0,Math.min(1,(localX-margin.left)/chartWidth));
+  const index=Math.round(position*(latestChart.labels.length-1));
+  const tooltip=document.getElementById('chartTooltip');
+  tooltip.innerHTML=`<strong>${monthLabel(latestChart.labels[index])}</strong><br>Monthly: ${fmt(latestChart.dca[index])}<br>Lump sum: ${fmt(latestChart.lump[index])}<br>Picker: ${fmt(latestChart.picker[index])}`;
+  tooltip.style.display='block';
+  tooltip.style.left=Math.min(rect.width-tooltip.offsetWidth-6,Math.max(6,localX+12))+'px';
+  tooltip.style.top='8px';
+}
+
+function render(){
+  if(!DATA.months.length)return;
+  const readInt=id=>parseInt(document.getElementById(id).value,10);
+  const readFloat=id=>parseFloat(document.getElementById(id).value);
+  const months=readInt('backtestMonths');const monthly=readInt('monthly');const topY=readInt('topY');
+  const mode=document.getElementById('weightMode').value;const rebuy=readInt('rebuyMonths');const mmRate=readFloat('mmRate');
+  const dip=readInt('dipThreshold');const gain=readInt('gainThreshold');const feePct=readFloat('feePct');const feeMin=readFloat('feeMin');
+  const values={backtestMonths:months,monthly:monthly.toLocaleString('en-US'),topY,rebuyMonths:rebuy,mmRate:mmRate.toFixed(1),dipThreshold:dip,gainThreshold:gain,feePct:feePct.toFixed(2),feeMin:feeMin.toFixed(2)};
+  Object.entries(values).forEach(([id,value])=>document.getElementById(id+'Val').textContent=value);
+  const labels=DATA.months.slice(-months);
+  document.getElementById('endMonthLabel').textContent=monthLabel(labels.at(-1));
+
+  const benchmark=simulateBenchmark(months,monthly,feePct,feeMin);
+  const picker=simulateStockPicker(months,monthly,topY,mode,dip,gain,rebuy,feePct,feeMin,mmRate);
+  setMetric('dca',benchmark.invested,benchmark.dcaValue,benchmark.dcaCagr);
+  setMetric('ls',benchmark.lumpTotal,benchmark.lumpValue,benchmark.lumpCagr);
+  setMetric('rb',picker.invested,picker.finalValue,picker.cagr);
+  document.getElementById('rbDetail').textContent=`Selected ${picker.selectedNames.length} · holding ${picker.holdingCount} · ${picker.trades} trades (${(picker.trades/months).toFixed(1)}/mo) · ${fmt(picker.feesPaid)} fees · ${fmt(picker.interestEarned)} interest`;
+  document.getElementById('rbHoldings').textContent=picker.holdingCount?`Currently holding: ${picker.holdingNames.join(', ')}`:'Currently holding: none';
+
+  const results=[['Monthly investing wins',benchmark.dcaValue],['Lump sum wins',benchmark.lumpValue],['Stock picker wins',picker.finalValue]].sort((a,b)=>b[1]-a[1]);
+  const stamp=document.getElementById('stamp');stamp.hidden=false;stamp.textContent=results[0][1]-results[1][1]<results[0][1]*.01?'Nearly a tie':results[0][0];
+  latestChart={labels,dca:benchmark.dcaSeries,lump:benchmark.lumpSeries,picker:picker.series};
+  drawChart();updateTable();
+}
+
+function configureControls(){
+  const backtestMonths=document.getElementById('backtestMonths');
+  backtestMonths.max=String(DATA.months.length-1);
+  backtestMonths.value=String(Math.min(120,DATA.months.length-1));
+  document.getElementById('dataRangeLabel').textContent=`DATA WINDOW: ${monthLabel(DATA.months[0]).toUpperCase()} — ${monthLabel(DATA.months.at(-1)).toUpperCase()} · ${Object.keys(DATA.prices).length} CONSTITUENTS`;
+  document.getElementById('simulatorControls').disabled=false;
+  document.getElementById('runOptimizer').disabled=false;
+}
+
+function showDataError(error){
+  const status=document.getElementById('dataStatus');status.className='status error';
+  status.innerHTML=`<div><strong>Data could not be loaded.</strong><br>${error.message}</div>`;
+}
+
+async function initialize(){
+  try{
+    await loadData();configureControls();
+    const status=document.getElementById('dataStatus');status.className='status ready';
+    status.innerHTML=`Loaded <strong>${DATA.months.length} monthly observations</strong>, <strong>${Object.keys(DATA.prices).length} constituents</strong>, and three top-50 rankings.`;
+    render();
+  }catch(error){showDataError(error);console.error(error);}
+}
+
+['monthly','backtestMonths','topY','rebuyMonths','mmRate','dipThreshold','gainThreshold','feePct','feeMin'].forEach(id=>document.getElementById(id).addEventListener('input',render));
+document.getElementById('weightMode').addEventListener('change',render);
+document.getElementById('runOptimizer').addEventListener('click',runOptimizer);
+document.querySelectorAll('[data-objective]').forEach(button=>button.addEventListener('click',()=>applyOptimizerSettings(button.dataset.objective)));
+document.getElementById('chart').addEventListener('mousemove',showTooltip);
+document.getElementById('chart').addEventListener('mouseleave',()=>document.getElementById('chartTooltip').style.display='none');
+document.getElementById('tableToggle').addEventListener('click',event=>{
+  const table=document.getElementById('dataTableWrap');const open=table.classList.toggle('open');
+  event.currentTarget.setAttribute('aria-expanded',String(open));event.currentTarget.textContent=open?'Hide table':'Show table';
+});
+window.addEventListener('resize',()=>{cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(drawChart);});
+window.addEventListener('load',initialize);
+</script>
+</body>
+</html>
