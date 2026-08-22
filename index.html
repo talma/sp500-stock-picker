@@ -167,7 +167,7 @@
   </fieldset>
 
   <div class="note">
-    Each ranking mode selects its own top N universe and uses that metric for allocation. Each month, a held stock that falls beyond the dip threshold or rises beyond the take-profit threshold is sold; moderate declines receive new capital. Empty eligible slots are filled in ranking order. Missing prices are skipped and their allocation is redistributed among stocks with valid data.
+    Each ranking mode selects its own top N universe and uses that metric for allocation. Each month, a held stock that falls beyond the dip threshold or rises beyond the take-profit threshold is sold; moderate declines receive new capital. Empty eligible slots are filled in ranking order. Missing prices are skipped and their allocation is redistributed among stocks with valid data. Profitable sales incur a 25% tax on realized profit after selling fees, using average cost basis including buy fees; losses receive no tax credit.
   </div>
 
   <section aria-labelledby="optimizerTitle">
@@ -212,21 +212,26 @@
     <div class="stamp" id="stamp" hidden></div>
     <article class="card">
       <h2>Monthly investing</h2>
-      <div class="row"><span class="label">Total invested</span><span class="num" id="dcaInvested">—</span></div>
+      <div class="row"><span class="label">Total contributed</span><span class="num" id="dcaInvested">—</span></div>
+      <div class="row"><span class="label">Investment fees</span><span class="num" id="dcaFees">—</span></div>
       <div class="row"><span class="label">Final value</span><span class="num" id="dcaFinal">—</span></div>
       <div class="row"><span class="label">Gain / loss</span><span class="num" id="dcaGain">—</span></div>
       <div class="row"><span class="label">CAGR</span><span class="num" id="dcaCagr">—</span></div>
     </article>
     <article class="card">
       <h2>Lump sum on day one</h2>
-      <div class="row"><span class="label">Total invested</span><span class="num" id="lsInvested">—</span></div>
+      <div class="row"><span class="label">Total contributed</span><span class="num" id="lsInvested">—</span></div>
+      <div class="row"><span class="label">Investment fee</span><span class="num" id="lsFees">—</span></div>
+      <div class="row"><span class="label">Net amount invested</span><span class="num" id="lsNetInvested">—</span></div>
       <div class="row"><span class="label">Final value</span><span class="num" id="lsFinal">—</span></div>
       <div class="row"><span class="label">Gain / loss</span><span class="num" id="lsGain">—</span></div>
       <div class="row"><span class="label">CAGR</span><span class="num" id="lsCagr">—</span></div>
     </article>
     <article class="card">
       <h2>Rule-based stock picker</h2>
-      <div class="row"><span class="label">Total invested</span><span class="num" id="rbInvested">—</span></div>
+      <div class="row"><span class="label">Total contributed</span><span class="num" id="rbInvested">—</span></div>
+      <div class="row"><span class="label">Trading fees</span><span class="num" id="rbFees">—</span></div>
+      <div class="row"><span class="label">Profit tax (25%)</span><span class="num" id="rbTaxes">—</span></div>
       <div class="row"><span class="label">Final value</span><span class="num" id="rbFinal">—</span></div>
       <div class="row"><span class="label">Gain / loss</span><span class="num" id="rbGain">—</span></div>
       <div class="row"><span class="label">CAGR</span><span class="num" id="rbCagr">—</span></div>
@@ -405,16 +410,20 @@ function simulateBenchmark(months,monthlyInvestment,feePct,feeMin){
   const rates=DATA.benchmarkReturns.slice(-months);
   const years=months/12;
   const lumpTotal=monthlyInvestment*months;
+  const monthlyFee=tradeFee(monthlyInvestment,feePct,feeMin);
+  const dcaFees=monthlyFee*months;
+  const lumpFee=tradeFee(lumpTotal,feePct,feeMin);
+  const lumpNetInvested=lumpTotal-lumpFee;
   let dcaValue=0;
-  let lumpValue=lumpTotal-tradeFee(lumpTotal,feePct,feeMin);
+  let lumpValue=lumpNetInvested;
   const dcaSeries=[]; const lumpSeries=[];
   rates.forEach(rate=>{
-    dcaValue=(dcaValue+monthlyInvestment-tradeFee(monthlyInvestment,feePct,feeMin))*(1+rate);
+    dcaValue=(dcaValue+monthlyInvestment-monthlyFee)*(1+rate);
     lumpValue*=1+rate;
     dcaSeries.push(dcaValue); lumpSeries.push(lumpValue);
   });
   return {
-    dcaSeries,lumpSeries,dcaValue,lumpValue,
+    dcaSeries,lumpSeries,dcaValue,lumpValue,dcaFees,lumpFee,lumpNetInvested,
     invested:monthlyInvestment*months,lumpTotal,
     dcaCagr:safeCagr(dcaValue,monthlyInvestment*months,years),
     lumpCagr:safeCagr(lumpValue,lumpTotal,years)
@@ -435,12 +444,22 @@ function metricWeights(items){
   return total>0?positives.map(value=>value/total):items.map(()=>1/items.length);
 }
 
+function settleSale(shares,salePrice,costBasis,sellingFee,taxRate=.25){
+  const grossProceeds=shares*salePrice;
+  const proceedsAfterFee=Math.max(0,grossProceeds-sellingFee);
+  const taxableProfit=Math.max(0,proceedsAfterFee-costBasis);
+  const tax=taxableProfit*taxRate;
+  return {grossProceeds,taxableProfit,tax,cashReceived:proceedsAfterFee-tax};
+}
+function createHoldingHistory(){return [];}
+function recordHolding(history,ticker){if(!history.includes(ticker))history.push(ticker);}
+
 function simulateStockPicker(months,monthlyInvestment,topY,mode,dipPct,gainPct,rebuyMonths,feePct,feeMin,mmRate){
   const criterion=RANKING_BY_MODE[mode];
   const ranked=selectedUniverse(mode,topY);
   const start=DATA.months.length-months-1;
-  const holdings={}; const cooldown={};
-  let cash=0; let trades=0; let feesPaid=0; let interestEarned=0;
+  const holdings={}; const cooldown={}; const periodHoldingNames=createHoldingHistory();
+  let cash=0; let trades=0; let feesPaid=0; let taxesPaid=0; let interestEarned=0;
   const monthlyRate=Math.pow(1+mmRate/100,1/12)-1;
   const series=[];
 
@@ -457,9 +476,11 @@ function simulateStockPicker(months,monthlyInvestment,topY,mode,dipPct,gainPct,r
       if(holdings[ticker]){
         const change=current/previous-1;
         if(change < -dipPct/100 || change > gainPct/100){
-          const proceeds=holdings[ticker].shares*current;
+          const position=holdings[ticker];
+          const proceeds=position.shares*current;
           const fee=tradeFee(proceeds,feePct,feeMin);
-          cash+=Math.max(0,proceeds-fee);feesPaid+=fee;delete holdings[ticker];cooldown[ticker]=rebuyMonths;trades++;
+          const sale=settleSale(position.shares,current,position.costBasis,fee,.25);
+          cash+=sale.cashReceived;feesPaid+=fee;taxesPaid+=sale.tax;delete holdings[ticker];cooldown[ticker]=rebuyMonths;trades++;
         }else if(change<0){buyTargets.push(item);}
       }
     });
@@ -478,8 +499,10 @@ function simulateStockPicker(months,monthlyInvestment,topY,mode,dipPct,gainPct,r
         const net=Math.max(0,amount-fee);
         if(net<=0)return;
         const ticker=item.ticker;
-        holdings[ticker] ||= {shares:0};
+        holdings[ticker] ||= {shares:0,costBasis:0};
         holdings[ticker].shares+=net/DATA.prices[ticker][index];
+        holdings[ticker].costBasis+=amount;
+        recordHolding(periodHoldingNames,ticker);
         feesPaid+=fee;trades++;
       });
       cash=0;
@@ -496,11 +519,11 @@ function simulateStockPicker(months,monthlyInvestment,topY,mode,dipPct,gainPct,r
   const invested=monthlyInvestment*months;
   const finalValue=series.at(-1)||0;
   return {
-    series,finalValue,invested,trades,feesPaid,interestEarned,cashBalance:cash,
+    series,finalValue,invested,trades,feesPaid,taxesPaid,interestEarned,cashBalance:cash,
     cagr:safeCagr(finalValue,invested,months/12),
     volatility:contributionAdjustedVolatility(series,monthlyInvestment),
     holdingNames:Object.keys(holdings),holdingCount:Object.keys(holdings).length,
-    selectedNames:ranked.map(item=>item.ticker)
+    periodHoldingNames,selectedNames:ranked.map(item=>item.ticker)
   };
 }
 
@@ -599,7 +622,7 @@ function renderOptimizerResults(winners){
     const cagrField=card.querySelector('[data-field="cagr"]');if(cagrField)cagrField.textContent=result.cagr.toFixed(1)+'%';
     const volatilityField=card.querySelector('[data-field="volatility"]');if(volatilityField)volatilityField.textContent=(result.volatility*100).toFixed(1)+'%';
     card.querySelector('[data-field="trades"]').textContent=result.trades.toLocaleString();
-    card.querySelector('[data-field="parameters"]').textContent=`Top ${parameters.topY} · dip −${parameters.dipPct}% · gain +${parameters.gainPct}% · cooldown ${parameters.rebuyMonths} mo · fees ${fmt(result.feesPaid)}`;
+    card.querySelector('[data-field="parameters"]').textContent=`Top ${parameters.topY} · dip −${parameters.dipPct}% · gain +${parameters.gainPct}% · cooldown ${parameters.rebuyMonths} mo · fees ${fmt(result.feesPaid)} · tax ${fmt(result.taxesPaid)}`;
   });
 }
 
@@ -611,6 +634,18 @@ function applyOptimizerSettings(objective){
   document.getElementById('rebuyMonths').value=parameters.rebuyMonths;
   render();
   document.getElementById('optimizerTitle').scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+function renderPeriodHoldings(periodHoldingNames,currentHoldingNames){
+  const container=document.getElementById('rbHoldings');container.textContent='';
+  const label=document.createElement('span');label.textContent='Period holdings: ';container.appendChild(label);
+  const current=new Set(currentHoldingNames);
+  if(!periodHoldingNames.length){container.appendChild(document.createTextNode('none'));return;}
+  periodHoldingNames.forEach((ticker,index)=>{
+    if(index)container.appendChild(document.createTextNode(', '));
+    const element=document.createElement(current.has(ticker)?'strong':'span');element.textContent=ticker;container.appendChild(element);
+  });
+  const legend=document.createElement('span');legend.textContent=' · bold = held at period end';container.appendChild(legend);
 }
 
 function setMetric(prefix,invested,finalValue,cagr){
@@ -699,8 +734,13 @@ function render(){
   setMetric('dca',benchmark.invested,benchmark.dcaValue,benchmark.dcaCagr);
   setMetric('ls',benchmark.lumpTotal,benchmark.lumpValue,benchmark.lumpCagr);
   setMetric('rb',picker.invested,picker.finalValue,picker.cagr);
-  document.getElementById('rbDetail').textContent=`Selected ${picker.selectedNames.length} · holding ${picker.holdingCount} · ${picker.trades} trades (${(picker.trades/months).toFixed(1)}/mo) · ${fmt(picker.feesPaid)} fees · ${fmt(picker.interestEarned)} interest`;
-  document.getElementById('rbHoldings').textContent=picker.holdingCount?`Currently holding: ${picker.holdingNames.join(', ')}`:'Currently holding: none';
+  document.getElementById('dcaFees').textContent=fmt(benchmark.dcaFees);
+  document.getElementById('lsFees').textContent=fmt(benchmark.lumpFee);
+  document.getElementById('lsNetInvested').textContent=fmt(benchmark.lumpNetInvested);
+  document.getElementById('rbFees').textContent=fmt(picker.feesPaid);
+  document.getElementById('rbTaxes').textContent=fmt(picker.taxesPaid);
+  document.getElementById('rbDetail').textContent=`Selected ${picker.selectedNames.length} · holding ${picker.holdingCount} · ${picker.trades} trades (${(picker.trades/months).toFixed(1)}/mo) · ${fmt(picker.interestEarned)} interest`;
+  renderPeriodHoldings(picker.periodHoldingNames,picker.holdingNames);
 
   const results=[['Monthly investing wins',benchmark.dcaValue],['Lump sum wins',benchmark.lumpValue],['Stock picker wins',picker.finalValue]].sort((a,b)=>b[1]-a[1]);
   const stamp=document.getElementById('stamp');stamp.hidden=false;stamp.textContent=results[0][1]-results[1][1]<results[0][1]*.01?'Nearly a tie':results[0][0];

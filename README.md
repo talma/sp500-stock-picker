@@ -7,6 +7,8 @@ A browser-based educational backtest comparing monthly investing, lump-sum inves
 - Select 1–50 top-ranked stocks.
 - Rank and weight by market capitalization, trailing-year average daily volume, or trailing-year performance.
 - Configure dip sales, take-profit sales, rebuy cooldowns, fees, and idle-cash interest.
+- Apply a 25% tax to realized picker profits using average cost basis; losses receive no tax credit.
+- Review every ticker held during the period, with end-of-period holdings shown in bold.
 - Optimize rule parameters for maximum gain, minimum contribution-adjusted volatility, or minimum trades.
 - Compare results with an equal-weight current-constituent benchmark proxy.
 
