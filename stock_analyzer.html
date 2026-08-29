@@ -494,9 +494,11 @@ function renderNews(news, sections) {
   if (!news) return unavailableNote(body, sections, "news");
   const badge = (score, label) => `<span class="sent ${score > 0.15 ? "pos" :
     score < -0.15 ? "neg" : ""}">${esc(label)} ${fmtNum(score, 2)}</span>`;
+  const isSafeUrl = url => /^https?:\/\//i.test(String(url ?? ""));
   const rows = (news.articles || []).map(a => `
-    <tr><td><a href="${esc(a.url)}" target="_blank" rel="noopener">
-      ${esc(a.title)}</a><div class="topics">${esc((a.topics || [])
+    <tr><td>${isSafeUrl(a.url) ?
+        `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.title)}</a>` :
+        esc(a.title)}<div class="topics">${esc((a.topics || [])
       .join(" · "))}</div></td>
     <td class="mono" style="font-size:12px">${esc(a.source)}<br>
       ${esc((a.publishedAt || "").replace("T", " "))}</td>
