@@ -455,3 +455,130 @@ def test_yf_analyst_upgrades_downgrades_trimmed_to_10():
 
     # Should be trimmed to 10
     assert len(analyst["upgradesDowngrades"]) == 10
+
+
+# ---------- Alpha Vantage ----------
+
+def test_av_client_counts_calls_and_builds_url():
+    seen = []
+    def fake_fetch(url):
+        seen.append(url)
+        return {"feed": []}
+    client = src.AVClient("AVSECRET", fetch_json=fake_fetch)
+    client.get("NEWS_SENTIMENT", tickers="AAPL")
+    assert client.calls_used == 1
+    assert "function=NEWS_SENTIMENT" in seen[0]
+    assert "tickers=AAPL" in seen[0] and "apikey=AVSECRET" in seen[0]
+
+
+@pytest.mark.parametrize("payload", [
+    {"Note": "Thank you ... 25 requests per day"},
+    {"Information": "rate limit is 25 requests per day"},
+])
+def test_av_quota_message_raises_quota_exhausted(payload):
+    client = src.AVClient("K", fetch_json=lambda url: payload)
+    with pytest.raises(src.QuotaExhausted):
+        client.get("RSI", symbol="AAPL")
+
+
+def article(score, minutes):
+    return {"title": f"t{minutes}", "source": "Reuters",
+            "url": "https://example.com/a",
+            "time_published": f"20260829T10{minutes:02d}00",
+            "overall_sentiment_score": score,
+            "overall_sentiment_label": "Neutral",
+            "topics": [{"topic": "Earnings"}, {"topic": "Technology"}]}
+
+
+def test_parse_news_trims_to_15_and_aggregates():
+    payload = {"feed": [article(0.4, m) for m in range(20)]}
+    news = src.parse_news(payload)
+    assert len(news["articles"]) == 15
+    assert news["aggregateScore"] == pytest.approx(0.4)
+    assert news["aggregateLabel"] == "Bullish"
+    first = news["articles"][0]
+    assert first["publishedAt"] == "2026-08-29T10:00:00"
+    assert first["topics"] == ["Earnings", "Technology"]
+
+
+def test_parse_news_empty_feed():
+    news = src.parse_news({"feed": []})
+    assert news["articles"] == []
+    assert news["aggregateScore"] is None
+
+
+@pytest.mark.parametrize("score,label", [
+    (-0.5, "Bearish"), (-0.2, "Somewhat-Bearish"), (0.0, "Neutral"),
+    (0.2, "Somewhat-Bullish"), (0.5, "Bullish"),
+])
+def test_sentiment_label_bands(score, label):
+    assert src.sentiment_label(score) == label
+
+
+def close_series(n=300, start=100.0, step=0.5):
+    dates = pd.date_range(end="2026-08-28", periods=n, freq="B")
+    return pd.Series([start + i * step for i in range(n)], index=dates)
+
+
+RSI_PAYLOAD = {"Technical Analysis: RSI": {
+    "2026-08-28": {"RSI": "71.2"}, "2026-08-27": {"RSI": "65.0"}}}
+MACD_PAYLOAD = {"Technical Analysis: MACD": {
+    "2026-08-28": {"MACD": "2.10", "MACD_Signal": "1.80", "MACD_Hist": "0.30"}}}
+SMA50_PAYLOAD = {"Technical Analysis: SMA": {
+    "2026-08-28": {"SMA": "230.5"}, "2026-08-27": {"SMA": "229.9"}}}
+SMA200_PAYLOAD = {"Technical Analysis: SMA": {
+    "2026-08-28": {"SMA": "205.1"}}}
+
+
+def test_parse_technicals_from_av_payloads():
+    technicals = src.parse_technicals(
+        RSI_PAYLOAD, MACD_PAYLOAD, SMA50_PAYLOAD, SMA200_PAYLOAD,
+        close_series())
+    assert technicals["rsi"] == {"value": 71.2, "state": "overbought"}
+    assert technicals["macd"]["state"] == "bullish"
+    assert technicals["sma50"][-1] == {"date": "2026-08-28", "value": 230.5}
+    assert len(technicals["prices"]) == 250          # trimmed from 300
+    assert set(technicals["prices"][0]) == {"date", "close"}
+
+
+def test_compute_local_technicals_shape_and_states():
+    technicals = src.compute_local_technicals(close_series())
+    assert len(technicals["prices"]) == 250
+    assert len(technicals["sma50"]) <= 250
+    # steadily rising series: RSI near 100, MACD above signal, SMA50 > SMA200
+    assert technicals["rsi"]["value"] > 70
+    assert technicals["rsi"]["state"] == "overbought"
+    assert technicals["macd"]["state"] == "bullish"
+    assert technicals["sma50"][-1]["value"] > technicals["sma200"][-1]["value"]
+
+
+@pytest.mark.parametrize("value,state", [
+    (75.0, "overbought"), (50.0, "neutral"), (25.0, "oversold")])
+def test_rsi_state_bands(value, state):
+    assert src._rsi_state(value) == state
+
+
+def econ(values):   # newest first, monthly
+    return {"data": [{"date": d, "value": str(v)} for d, v in values]}
+
+
+def test_parse_macro():
+    cpi_values = [(f"2026-{m:02d}-01", 320.0) for m in range(7, 0, -1)]
+    cpi_values += [(f"2025-{m:02d}-01", 310.0) for m in range(12, 6, -1)]
+    cpi_values += [("2025-06-01", 308.0)]
+    macro = src.parse_macro(
+        econ([("2026-08-01", 4.25)]),
+        econ(cpi_values),
+        econ([("2026-08-01", 3.75)]),
+        econ([("2026-08-01", 4.1)]))
+    assert macro["treasury10y"] == 4.25
+    assert macro["fedFunds"] == 3.75
+    assert macro["unemployment"] == 4.1
+    # latest 2026-07 = 320 vs 2025-07 = 310 → +3.2258%
+    assert macro["cpiYoY"] == pytest.approx((320.0 / 310.0 - 1) * 100)
+
+
+def test_parse_macro_missing_series_is_none():
+    macro = src.parse_macro({}, {}, None, econ([]))
+    assert macro == {"treasury10y": None, "fedFunds": None,
+                     "cpiYoY": None, "unemployment": None}

@@ -4,6 +4,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import pandas as pd
 import yfinance as yf
 
 FMP_BASE = "https://financialmodelingprep.com/stable"
@@ -304,3 +305,195 @@ def yf_analyst(ticker, ticker_factory=yf.Ticker):
             "targets": {"low": targets.get("low"), "mean": targets.get("mean"),
                         "high": targets.get("high")},
             "upgradesDowngrades": changes}
+
+
+# ---------- Alpha Vantage ----------
+
+AV_BASE = "https://www.alphavantage.co/query"
+
+
+class QuotaExhausted(Exception):
+    """Alpha Vantage daily or per-minute quota hit."""
+
+
+class AVClient:
+    def __init__(self, api_key, fetch_json=_http_get_json):
+        self.api_key = api_key
+        self.fetch_json = fetch_json
+        self.calls_used = 0
+
+    def get(self, function, **params):
+        params.update({"function": function, "apikey": self.api_key})
+        url = f"{AV_BASE}?{urllib.parse.urlencode(params)}"
+        payload = self.fetch_json(url)
+        message = payload.get("Note") or payload.get("Information") or ""
+        if "request" in message.lower() or "limit" in message.lower():
+            raise QuotaExhausted(f"{function}: {message}")
+        if payload.get("Error Message"):
+            raise RuntimeError(f"AV {function}: {payload['Error Message']}")
+        self.calls_used += 1
+        return payload
+
+
+def sentiment_label(score):
+    if score <= -0.35:
+        return "Bearish"
+    if score <= -0.15:
+        return "Somewhat-Bearish"
+    if score < 0.15:
+        return "Neutral"
+    if score < 0.35:
+        return "Somewhat-Bullish"
+    return "Bullish"
+
+
+def _iso_time(av_time):
+    # "20260829T101500" -> "2026-08-29T10:15:00"
+    if not av_time or len(av_time) < 15:
+        return av_time
+    d, t = av_time[:8], av_time[9:15]
+    return f"{d[:4]}-{d[4:6]}-{d[6:8]}T{t[:2]}:{t[2:4]}:{t[4:6]}"
+
+
+def parse_news(payload):
+    feed = (payload or {}).get("feed") or []
+    articles = []
+    for item in feed[:15]:
+        score = item.get("overall_sentiment_score")
+        articles.append({
+            "title": item.get("title"),
+            "source": item.get("source"),
+            "url": item.get("url"),
+            "publishedAt": _iso_time(item.get("time_published")),
+            "sentimentScore": score,
+            "sentimentLabel": item.get("overall_sentiment_label")
+                or (sentiment_label(score) if score is not None else None),
+            "topics": [t.get("topic") for t in item.get("topics") or []],
+        })
+    scores = [a["sentimentScore"] for a in articles
+              if a["sentimentScore"] is not None]
+    aggregate = sum(scores) / len(scores) if scores else None
+    return {"aggregateScore": aggregate,
+            "aggregateLabel": sentiment_label(aggregate)
+                if aggregate is not None else None,
+            "articles": articles}
+
+
+def _rsi_state(value):
+    if value is None:
+        return None
+    if value >= 70:
+        return "overbought"
+    if value <= 30:
+        return "oversold"
+    return "neutral"
+
+
+def _macd_state(macd, signal):
+    if macd is None or signal is None:
+        return None
+    return "bullish" if macd > signal else "bearish"
+
+
+def _trim_series(pairs, limit=250):
+    """pairs: [(date_str, float)] oldest-first -> last `limit` dicts."""
+    return [{"date": d, "value": v} for d, v in pairs[-limit:]]
+
+
+def _prices_from_close(close, limit=250):
+    tail = close.dropna().iloc[-limit:]
+    return [{"date": str(index.date()), "close": round(float(value), 4)}
+            for index, value in tail.items()]
+
+
+def _av_series(payload, series_key, value_key):
+    block = (payload or {}).get(series_key) or {}
+    pairs = sorted((date, float(values[value_key]))
+                   for date, values in block.items() if value_key in values)
+    return pairs   # oldest first
+
+
+def parse_technicals(rsi_payload, macd_payload, sma50_payload,
+                     sma200_payload, close):
+    rsi_pairs = _av_series(rsi_payload, "Technical Analysis: RSI", "RSI")
+    rsi_value = rsi_pairs[-1][1] if rsi_pairs else None
+    macd_block = (macd_payload or {}).get("Technical Analysis: MACD") or {}
+    macd_value = signal_value = None
+    if macd_block:
+        latest = macd_block[max(macd_block)]
+        macd_value = float(latest["MACD"])
+        signal_value = float(latest["MACD_Signal"])
+    return {
+        "prices": _prices_from_close(close),
+        "sma50": _trim_series(_av_series(sma50_payload,
+                                         "Technical Analysis: SMA", "SMA")),
+        "sma200": _trim_series(_av_series(sma200_payload,
+                                          "Technical Analysis: SMA", "SMA")),
+        "rsi": {"value": rsi_value, "state": _rsi_state(rsi_value)},
+        "macd": {"macd": macd_value, "signal": signal_value,
+                 "state": _macd_state(macd_value, signal_value)},
+    }
+
+
+def compute_local_technicals(close):
+    close = close.dropna()
+    delta = close.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+    rsi = 100 - 100 / (1 + gain / loss)
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+
+    def series_pairs(series):
+        clean = series.dropna()
+        return [(str(index.date()), round(float(value), 4))
+                for index, value in clean.items()]
+
+    rsi_value = round(float(rsi.iloc[-1]), 2) if len(rsi) else None
+    macd_value = round(float(macd.iloc[-1]), 4) if len(macd) else None
+    signal_value = round(float(signal.iloc[-1]), 4) if len(signal) else None
+    # Determine MACD state from raw values before rounding to preserve precision
+    macd_state = _macd_state(macd.iloc[-1] if len(macd) else None,
+                             signal.iloc[-1] if len(signal) else None)
+    return {
+        "prices": _prices_from_close(close),
+        "sma50": _trim_series(series_pairs(close.rolling(50).mean())),
+        "sma200": _trim_series(series_pairs(close.rolling(200).mean())),
+        "rsi": {"value": rsi_value, "state": _rsi_state(rsi_value)},
+        "macd": {"macd": macd_value, "signal": signal_value,
+                 "state": macd_state},
+    }
+
+
+def _latest_econ(payload):
+    data = (payload or {}).get("data") or []
+    for row in data:
+        try:
+            return float(row["value"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
+def _cpi_yoy(payload):
+    data = (payload or {}).get("data") or []
+    values = []
+    for row in data:
+        try:
+            values.append((row["date"], float(row["value"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if len(values) < 13:
+        return None
+    latest, year_ago = values[0][1], values[12][1]
+    return (latest / year_ago - 1) * 100 if year_ago else None
+
+
+def parse_macro(treasury_payload, cpi_payload, fedfunds_payload,
+                unemployment_payload):
+    return {"treasury10y": _latest_econ(treasury_payload),
+            "fedFunds": _latest_econ(fedfunds_payload),
+            "cpiYoY": _cpi_yoy(cpi_payload),
+            "unemployment": _latest_econ(unemployment_payload)}
