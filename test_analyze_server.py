@@ -338,3 +338,57 @@ def test_unknown_ticker_propagates_lookup_error():
                             src=stub_src(yf_quote=raising_quote))
     with pytest.raises(LookupError):
         fetcher.fetch("ZZZZZZ")
+
+
+# ==================== Task 5 fix round: review findings ====================
+
+import threading
+import time
+
+
+def test_stored_bundle_is_not_aliased_to_backing_store():
+    """Analyzer._stored() must hand back a copy, not the object the backend
+    is holding — MemoryBackend.get_daily returns the exact stored object, so
+    mutating it in place (setting fromStore/store on the returned bundle)
+    would permanently corrupt the cached document on every subsequent read."""
+    analyzer, store, fetcher = make_analyzer()
+    analyzer.analyze("AAPL")                      # store-miss: fetch + cache
+    first_read = analyzer.analyze("AAPL")          # store-hit #1
+    second_read = analyzer.analyze("AAPL")         # store-hit #2
+
+    stored = store.get_daily("AAPL", "2026-08-29")
+    assert first_read is not stored
+    assert first_read["meta"] is not stored["meta"]
+    assert second_read is not first_read
+
+    # Mutating a returned bundle's meta must not corrupt the backing store
+    # or a later read's bundle: the store keeps the bundle exactly as it was
+    # persisted at fetch time (fromStore False, since it was fresh then).
+    first_read["meta"]["fromStore"] = "corrupted"
+    third_read = analyzer.analyze("AAPL")
+    assert third_read["meta"]["fromStore"] is True
+    assert store.get_daily("AAPL", "2026-08-29")["meta"]["fromStore"] is False
+
+
+class SlowMacroFetcher(StubFetcher):
+    """fetch_macro sleeps before returning, giving a second thread a window
+    to observe a stale (still-None) store.get_macro() if the check-then-act
+    in Analyzer._macro() were not serialized."""
+
+    def fetch_macro(self):
+        time.sleep(0.05)
+        return super().fetch_macro()
+
+
+def test_concurrent_macro_fetch_is_serialized():
+    store = Store(backend=MemoryBackend())
+    fetcher = SlowMacroFetcher()
+    analyzer = Analyzer(store, fetcher, today=lambda: "2026-08-29")
+
+    thread = threading.Thread(target=lambda: analyzer.analyze("MSFT"))
+    thread.start()
+    time.sleep(0.01)      # let the thread reach the macro check/fetch first
+    analyzer.analyze("AAPL")
+    thread.join(timeout=2)
+
+    assert fetcher.macro_calls == 1

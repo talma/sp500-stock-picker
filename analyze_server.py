@@ -5,6 +5,7 @@ import argparse
 import datetime
 import json
 import os
+import threading
 import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -172,9 +173,15 @@ class Analyzer:
         self.store = store
         self.fetcher = fetcher
         self._today = today or (lambda: datetime.date.today().isoformat())
+        self._macro_lock = threading.Lock()
 
     def _stored(self, bundle):
-        bundle.setdefault("meta", {})["fromStore"] = True
+        # Shallow-copy before mutating: MemoryBackend.get_daily returns the
+        # exact object it has stored (no copy), so mutating in place would
+        # permanently corrupt the cached document on every read.
+        bundle = dict(bundle)
+        bundle["meta"] = dict(bundle.get("meta") or {})
+        bundle["meta"]["fromStore"] = True
         bundle["meta"]["store"] = self.store.kind
         return bundle
 
@@ -204,13 +211,17 @@ class Analyzer:
         return bundle
 
     def _macro(self, today):
-        macro = self.store.get_macro(today)
-        if macro is None:
-            try:
-                macro = self.fetcher.fetch_macro()
-                self.store.put_macro(today, macro)
-            except Exception:
-                macro = None
+        # Serialize the check-then-act: under ThreadingHTTPServer, two
+        # concurrent first-of-day requests could both observe a cache miss
+        # and both fetch, blowing the shared daily AV macro-call budget.
+        with self._macro_lock:
+            macro = self.store.get_macro(today)
+            if macro is None:
+                try:
+                    macro = self.fetcher.fetch_macro()
+                    self.store.put_macro(today, macro)
+                except Exception:
+                    macro = None
         return macro
 
     def analyzed(self):
