@@ -1,8 +1,56 @@
-# S&P 500 10-Year Monthly Price Downloader
+# S&P 500 Toolkit
+
+This repository hosts multiple, independent S&P 500 apps and tools that share
+the same downloaded price data:
+
+1. **[Stock Picker Simulator](#stock-picker-simulator)** (`index.html`) — a
+   published, browser-only backtest comparing monthly investing, lump-sum
+   investing, and a rule-based stock picker. Served via GitHub Pages; no
+   build step, no server.
+2. **[S&P 500 10-Year Monthly Price Downloader](#sp500-10-year-monthly-price-downloader)**
+   (`download_*.py`) — Python scripts that fetch the price data both apps
+   consume.
+3. **[S&P 500 Ledger simulator](#run-the-simulator)** (`sp500_simulator.html`) —
+   a second, more configurable backtest dashboard over the same downloaded
+   data.
+4. **[Stock analyzer / Equity Dossier](#stock-analyzer-equity-dossier)**
+   (`stock_analyzer.html` + `analyze_server.py`) — per-ticker value, analyst,
+   news, technical, and macro analysis, backed by a small local API server
+   and Firestore.
+
+---
+
+## Stock Picker Simulator
+
+A browser-based educational backtest comparing monthly investing, lump-sum
+investing, and a rule-based stock picker over downloaded monthly S&P 500
+constituent data. Published at the repo's GitHub Pages URL — open
+`index.html` directly, no server required.
+
+### Features
+
+- Select 1–50 top-ranked stocks.
+- Rank and weight by market capitalization, trailing-year average daily volume, or trailing-year performance.
+- Configure dip sales, take-profit sales, rebuy cooldowns, fees, and idle-cash interest.
+- Apply a 25% tax to realized picker profits using average cost basis; losses receive no tax credit.
+- Review every ticker held during the period, with end-of-period holdings shown in bold.
+- Optimize rule parameters for maximum gain, minimum trades, or minimum contribution-adjusted volatility among rules that outperform monthly investing.
+- Compare results with an equal-weight current-constituent benchmark proxy.
+
+### Methodology warning
+
+The backtest applies current S&P 500 membership and current ranking snapshots to historical prices. This introduces survivorship and look-ahead bias. The benchmark is an equal-weight proxy, not the official S&P 500 index. Optimizer results are in-sample and may overfit the selected historical window.
+
+This project is for education and research only, not financial advice.
+
+---
+
+## S&P 500 10-Year Monthly Price Downloader
 
 Downloads monthly adjusted-close prices for the current S&P 500 constituents
 over the last 10 years, using the live Wikipedia constituents list and
-Yahoo Finance via `yfinance`.
+Yahoo Finance via `yfinance`. This is the shared data source for the other
+apps in this repo.
 
 ## Setup
 
@@ -140,7 +188,9 @@ python3 analyze_server.py            # or --local-technicals, see below
 
 Open `http://localhost:8000/stock_analyzer.html`. The server also serves the
 rest of the project directory, so it replaces `python3 -m http.server` and
-`sp500_simulator.html` keeps working.
+`sp500_simulator.html` keeps working. By default it binds to `127.0.0.1`
+only; pass `--bind 0.0.0.0` to allow other machines on your network to reach
+it.
 
 Free-tier quotas: Alpha Vantage allows 25 requests/day (5/minute) — about 4
 freshly analyzed tickers/day. `--local-technicals` computes RSI/MACD/SMA
