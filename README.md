@@ -112,6 +112,46 @@ data introduces survivorship and look-ahead bias.
 
 Stop the server with `Ctrl+C` when finished.
 
+## Stock analyzer (Equity Dossier)
+
+Analyze any US-listed ticker: value grade from the trailing year of reports,
+analyst consensus, news sentiment, technicals, and macro context. Bundles are
+stored per day in Firestore, so repeat requests cost zero API calls and every
+user of the shared Firebase project sees the same archive and history.
+
+One-time setup:
+
+1. `pip install -r requirements.txt` (adds `firebase-admin`).
+2. Ensure `.env` contains `ALPHAVANTAGE_KEY`, `FMP_KEY`, and
+   `FIREBASE_PROJECT_ID`.
+3. Firebase console → Project settings → Service accounts → *Generate new
+   private key* → save as `firebase-service-account.json` in the project root
+   (gitignored — never commit it).
+4. Firebase console → Build → Firestore Database → *Create database* (if not
+   already enabled).
+5. Add to `.env`:
+   `GOOGLE_APPLICATION_CREDENTIALS=./firebase-service-account.json`
+
+Run:
+
+```bash
+python3 analyze_server.py            # or --local-technicals, see below
+```
+
+Open `http://localhost:8000/stock_analyzer.html`. The server also serves the
+rest of the project directory, so it replaces `python3 -m http.server` and
+`sp500_simulator.html` keeps working.
+
+Free-tier quotas: Alpha Vantage allows 25 requests/day (5/minute) — about 4
+freshly analyzed tickers/day. `--local-technicals` computes RSI/MACD/SMA
+locally from Yahoo prices instead of Alpha Vantage, stretching that to ~20
+tickers/day. FMP's 250 requests/day covers ~25 tickers. Already-analyzed
+tickers are served from Firestore at no API cost. Without Firestore
+credentials the server still runs with an in-memory store (nothing persists;
+the page footnote shows the store status).
+
+Not investment advice.
+
 ## Notes
 
 - Requires outbound internet access to `en.wikipedia.org` and
