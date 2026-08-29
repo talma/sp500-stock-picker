@@ -2,6 +2,7 @@
 """Local analysis server: static files + /api/analyze|analyzed|history.
 Run: python3 analyze_server.py [--port 8000] [--local-technicals]"""
 import argparse
+import collections
 import datetime
 import json
 import os
@@ -174,6 +175,15 @@ class Analyzer:
         self.fetcher = fetcher
         self._today = today or (lambda: datetime.date.today().isoformat())
         self._macro_lock = threading.Lock()
+        # Per-(ticker, date) locks, created lazily. Guarded by one outer lock
+        # so concurrent first-time lookups for different keys don't race on
+        # dict insertion, while different tickers still run in parallel.
+        self._analyze_locks = collections.defaultdict(threading.Lock)
+        self._analyze_locks_guard = threading.Lock()
+
+    def _lock_for(self, ticker, date):
+        with self._analyze_locks_guard:
+            return self._analyze_locks[(ticker, date)]
 
     def _stored(self, bundle):
         # Shallow-copy before mutating: MemoryBackend.get_daily returns the
@@ -193,22 +203,28 @@ class Analyzer:
                 raise NotFound(f"No stored analysis for {ticker} on {date}")
             return self._stored(bundle)
         today = self._today()
-        if not refresh:
-            bundle = self.store.get_daily(ticker, today)
-            if bundle is not None:
-                return self._stored(bundle)
-        bundle = self.fetcher.fetch(ticker)       # LookupError propagates
-        bundle["date"] = today
-        bundle["macro"] = self._macro(today)
-        bundle["meta"]["sections"]["macro"] = \
-            "ok" if bundle["macro"] else "unavailable"
-        bundle["meta"]["fromStore"] = False
-        bundle["meta"]["store"] = self.store.kind
-        self.store.put_daily(ticker, today, bundle)
-        self.store.upsert_registry(
-            ticker, bundle["snapshot"].get("name"),
-            bundle["snapshot"].get("sector"), today, _summary_of(bundle))
-        return bundle
+        # Serialize the check-then-act per (ticker, date): two concurrent
+        # requests for the same ticker (e.g. a double-submit from the UI)
+        # could otherwise both miss the store and both fetch, wasting API
+        # quota and racing on the write. Different tickers/dates don't
+        # contend with each other.
+        with self._lock_for(ticker, today):
+            if not refresh:
+                bundle = self.store.get_daily(ticker, today)
+                if bundle is not None:
+                    return self._stored(bundle)
+            bundle = self.fetcher.fetch(ticker)    # LookupError propagates
+            bundle["date"] = today
+            bundle["macro"] = self._macro(today)
+            bundle["meta"]["sections"]["macro"] = \
+                "ok" if bundle["macro"] else "unavailable"
+            bundle["meta"]["fromStore"] = False
+            bundle["meta"]["store"] = self.store.kind
+            self.store.put_daily(ticker, today, bundle)
+            self.store.upsert_registry(
+                ticker, bundle["snapshot"].get("name"),
+                bundle["snapshot"].get("sector"), today, _summary_of(bundle))
+            return bundle
 
     def _macro(self, today):
         # Serialize the check-then-act: under ThreadingHTTPServer, two
@@ -276,12 +292,32 @@ def handle_api(path, query, analyzer):
 class Handler(SimpleHTTPRequestHandler):
     analyzer = None    # set in main()
 
+    # Never serve dotfiles (e.g. .env, .git/config) or the Firebase service
+    # account key over the static file path — both hold plaintext secrets
+    # that must never reach the browser.
+    _BLOCKED_FILENAME = "firebase-service-account.json"
+
+    @classmethod
+    def _is_blocked_static_path(cls, path):
+        segments = [s for s in urllib.parse.unquote(path).split("/") if s]
+        if any(segment.startswith(".") for segment in segments):
+            return True
+        return bool(segments) and segments[-1] == cls._BLOCKED_FILENAME
+
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
         if not parsed.path.startswith("/api/"):
+            if self._is_blocked_static_path(parsed.path):
+                self.send_error(404, "File not found")
+                return
             return super().do_GET()
-        status, payload = handle_api(
-            parsed.path, urllib.parse.parse_qs(parsed.query), self.analyzer)
+        try:
+            status, payload = handle_api(
+                parsed.path, urllib.parse.parse_qs(parsed.query),
+                self.analyzer)
+        except Exception as error:
+            print(f"ERROR: unhandled exception in {parsed.path}: {error}")
+            status, payload = 500, {"error": str(error)}
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -295,6 +331,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Stock analyzer server: static files + analysis API.")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--bind", default="127.0.0.1",
+                        help="interface to bind (default: 127.0.0.1, "
+                             "loopback-only; use 0.0.0.0 to expose on the "
+                             "LAN — this spends the operator's API quota "
+                             "and writes to the shared Firestore project, "
+                             "so only opt in deliberately)")
     parser.add_argument("--local-technicals", action="store_true",
                         help="compute RSI/MACD/SMA locally from yfinance "
                              "prices (1 AV call/ticker instead of 5)")
@@ -310,9 +352,9 @@ def main():
     fetcher = BundleFetcher(fmp, av, local_technicals=args.local_technicals)
     Handler.analyzer = Analyzer(store, fetcher)
 
-    server = ThreadingHTTPServer(("", args.port), Handler)
-    print(f"Serving http://localhost:{args.port}/stock_analyzer.html "
-          f"(store: {store.kind}, technicals: "
+    server = ThreadingHTTPServer((args.bind, args.port), Handler)
+    print(f"Serving http://{args.bind}:{args.port}/stock_analyzer.html "
+          f"(bind: {args.bind}, store: {store.kind}, technicals: "
           f"{'local' if args.local_technicals else 'alpha vantage'})")
     server.serve_forever()
 

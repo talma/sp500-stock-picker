@@ -539,7 +539,8 @@ function renderFootnotes(bundle) {
 $("analyze-btn").addEventListener("click",
   () => analyze($("ticker-input").value, {}));
 $("ticker-input").addEventListener("keydown",
-  e => { if (e.key === "Enter") analyze($("ticker-input").value, {}); });
+  e => { if (e.key === "Enter" && !$("analyze-btn").disabled)
+    analyze($("ticker-input").value, {}); });
 $("refresh-btn").addEventListener("click", () => {
   if (currentTicker && confirm("Refresh re-fetches today's data and spends " +
       "API quota (~10 FMP + up to 5 Alpha Vantage calls). Continue?"))

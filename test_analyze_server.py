@@ -1,4 +1,6 @@
 # test_analyze_server.py
+import json
+
 import pytest
 
 from firestore_store import MemoryBackend, Store
@@ -392,3 +394,115 @@ def test_concurrent_macro_fetch_is_serialized():
     thread.join(timeout=2)
 
     assert fetcher.macro_calls == 1
+
+
+# ==================== Final review wave: Findings 3 & 4 ====================
+
+class SlowFetcher(StubFetcher):
+    """fetch() sleeps before returning, giving a second thread a window to
+    observe a stale (still-empty) store.get_daily() if analyze()'s own
+    check-then-act were not serialized per (ticker, date) — e.g. a
+    double-submit from stock_analyzer.html's Enter-key handler firing two
+    concurrent requests for the same ticker."""
+
+    def fetch(self, ticker):
+        time.sleep(0.05)
+        return super().fetch(ticker)
+
+
+def test_concurrent_analyze_same_ticker_is_serialized():
+    store = Store(backend=MemoryBackend())
+    fetcher = SlowFetcher()
+    analyzer = Analyzer(store, fetcher, today=lambda: "2026-08-29")
+
+    thread = threading.Thread(target=lambda: analyzer.analyze("AAPL"))
+    thread.start()
+    time.sleep(0.01)      # let the thread reach the fetch first
+    analyzer.analyze("AAPL")
+    thread.join(timeout=2)
+
+    assert fetcher.fetched.count("AAPL") == 1
+
+
+class SlowFetcherForTicker(StubFetcher):
+    """fetch() sleeps only for one designated ticker, so a second ticker's
+    analyze() call can be timed without its own fetch muddying the
+    measurement of whether it waited on the first ticker's lock."""
+
+    def __init__(self, slow_ticker, delay=0.05):
+        super().__init__()
+        self.slow_ticker = slow_ticker
+        self.delay = delay
+
+    def fetch(self, ticker):
+        if ticker == self.slow_ticker:
+            time.sleep(self.delay)
+        return super().fetch(ticker)
+
+
+def test_concurrent_analyze_different_tickers_are_not_serialized():
+    """Per-(ticker, date) granularity: a slow fetch for one ticker must not
+    block a concurrent analyze() of a different ticker (a single global
+    lock would be unnecessarily conservative here)."""
+    store = Store(backend=MemoryBackend())
+    fetcher = SlowFetcherForTicker("AAPL", delay=0.05)
+    analyzer = Analyzer(store, fetcher, today=lambda: "2026-08-29")
+
+    thread = threading.Thread(target=lambda: analyzer.analyze("AAPL"))
+    thread.start()
+    time.sleep(0.01)      # let AAPL's fetch begin (and start sleeping)
+    start = time.monotonic()
+    analyzer.analyze("MSFT")               # must not wait for AAPL's lock
+    elapsed = time.monotonic() - start
+    thread.join(timeout=2)
+
+    assert fetcher.fetched.count("MSFT") == 1
+    assert elapsed < 0.03    # near-instant; would be ~0.04s+ if serialized
+
+
+class RaisingAnalyzer:
+    """Stand-in whose analyze() raises an exception unrelated to NotFound/
+    LookupError, simulating e.g. a network/parse error surfacing from
+    BundleFetcher.fetch with no enclosing try/except."""
+
+    def analyze(self, ticker, date=None, refresh=False):
+        raise RuntimeError("boom: upstream data source exploded")
+
+
+def test_handle_api_unexpected_exception_is_not_caught_by_handle_api():
+    # handle_api() itself only catches NotFound/LookupError around
+    # /api/analyze — an unrelated exception must propagate out of it
+    # (Handler.do_GET is responsible for turning it into a 500).
+    with pytest.raises(RuntimeError):
+        handle_api("/api/analyze", {"ticker": ["AAPL"]}, RaisingAnalyzer())
+
+
+def test_do_get_returns_500_json_on_unexpected_exception(capsys):
+    import io
+
+    class FakeRequest:
+        def makefile(self, *args, **kwargs):
+            return io.BytesIO(b"")
+
+    handler = analyze_server.Handler.__new__(analyze_server.Handler)
+    handler.analyzer = RaisingAnalyzer()
+    handler.path = "/api/analyze?ticker=AAPL"
+    handler.client_address = ("127.0.0.1", 0)
+    handler.request = FakeRequest()
+    handler.rfile = io.BytesIO(b"")
+    handler.wfile = io.BytesIO()
+    status_holder = {}
+
+    def fake_send_response(status, message=None):
+        status_holder["status"] = status
+    handler.send_response = fake_send_response
+    handler.send_header = lambda *a, **k: None
+    handler.end_headers = lambda: None
+
+    handler.do_GET()
+
+    assert status_holder["status"] == 500
+    body = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert "error" in body
+    assert "boom" in body["error"]
+    assert "ERROR" in capsys.readouterr().out   # logged, not swallowed
