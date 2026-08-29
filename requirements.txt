@@ -2,3 +2,4 @@ pandas>=2.0
 yfinance>=0.2.40
 lxml>=5.0
 truststore>=0.10
+firebase-admin>=6.5
