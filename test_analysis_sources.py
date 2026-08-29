@@ -1,6 +1,8 @@
 # test_analysis_sources.py
 import urllib.error
+from datetime import datetime, timedelta
 
+import pandas as pd
 import pytest
 
 import analysis_sources as src
@@ -162,3 +164,294 @@ def test_yf_quote_unknown_ticker_raises_lookup_error():
             self.info = {}
     with pytest.raises(LookupError):
         src.yf_quote("ZZZZZZ", ticker_factory=EmptyTicker)
+
+
+# ---------- yfinance prices ----------
+
+def test_yf_prices_returns_close_series():
+    """yf_prices returns the Close column as a Series with DatetimeIndex."""
+    class PriceTicker:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        def history(self, period="1y", interval="1d", auto_adjust=True):
+            dates = pd.date_range(end="2026-08-28", periods=252, freq="D")
+            data = {"Close": range(100, 100 + len(dates))}
+            return pd.DataFrame(data, index=dates)
+
+    prices = src.yf_prices("AAPL", ticker_factory=PriceTicker)
+    assert isinstance(prices, pd.Series)
+    assert isinstance(prices.index, pd.DatetimeIndex)
+    assert len(prices) == 252
+    assert prices.iloc[0] == 100
+    assert prices.iloc[-1] == 351
+
+
+def test_yf_prices_empty_history_raises_lookup_error():
+    """yf_prices raises LookupError when history is empty."""
+    class EmptyHistoryTicker:
+        def __init__(self, symbol):
+            pass
+
+        def history(self, period="1y", interval="1d", auto_adjust=True):
+            return pd.DataFrame()
+
+    with pytest.raises(LookupError):
+        src.yf_prices("UNKNOWN", ticker_factory=EmptyHistoryTicker)
+
+
+def test_yf_prices_none_history_raises_lookup_error():
+    """yf_prices raises LookupError when history is None."""
+    class NoneHistoryTicker:
+        def __init__(self, symbol):
+            pass
+
+        def history(self, period="1y", interval="1d", auto_adjust=True):
+            return None
+
+    with pytest.raises(LookupError):
+        src.yf_prices("UNKNOWN", ticker_factory=NoneHistoryTicker)
+
+
+# ---------- yfinance fundamentals ----------
+
+def test_yf_fundamentals_with_8_quarters_and_full_data():
+    """yf_fundamentals returns correct fundamentals and metrics from 8 quarters of data."""
+    class FundamentalsTicker:
+        def __init__(self, symbol):
+            self.info = {"marketCap": 3e12, "trailingPE": 25.0, "pegRatio": 1.5,
+                         "priceToBook": 35.0}
+
+        @property
+        def quarterly_income_stmt(self):
+            dates = pd.date_range(end="2026-06-28", periods=8, freq="QS")
+            # 8 quarters: recent 4 sum to 410, prior 4 sum to 360
+            revenues = [100, 100, 110, 90, 95, 90, 95, 80]  # newest first
+            net_incomes = [25, 24, 30, 21, 22, 20, 24, 18]
+            eps_values = [1.60, 1.55, 1.90, 1.35, 1.40, 1.30, 1.55, 1.15]
+            return pd.DataFrame(
+                {"Total Revenue": revenues,
+                 "Net Income": net_incomes,
+                 "Diluted EPS": eps_values},
+                index=dates
+            ).T
+
+        @property
+        def quarterly_balance_sheet(self):
+            dates = pd.date_range(end="2026-06-28", periods=4, freq="QS")
+            return pd.DataFrame(
+                {"Current Assets": [140, 135, 130, 125],
+                 "Current Liabilities": [100, 98, 95, 90],
+                 "Total Debt": [110, 108, 105, 100],
+                 "Stockholders Equity": [80, 82, 85, 88]},
+                index=dates
+            ).T
+
+        @property
+        def quarterly_cashflow(self):
+            dates = pd.date_range(end="2026-06-28", periods=4, freq="QS")
+            return pd.DataFrame(
+                {"Free Cash Flow": [30, 28, 35, 22]},
+                index=dates
+            ).T
+
+    fundamentals, metrics = src.yf_fundamentals("AAPL", ticker_factory=FundamentalsTicker)
+
+    # Check fundamentals structure
+    assert "quarters" in fundamentals
+    assert "annual" in fundamentals
+    assert "ratios" in fundamentals
+    assert len(fundamentals["quarters"]) == 4
+    assert fundamentals["annual"] is None  # yfinance doesn't fetch annual data
+
+    # Check metrics
+    # Recent 4: 100+100+110+90 = 400; Prior 4: 95+90+95+80 = 360
+    assert metrics["revenueGrowth"] == pytest.approx((400 / 360) - 1)
+    # Recent 4: 1.60+1.55+1.90+1.35 = 6.40; Prior 4: 1.40+1.30+1.55+1.15 = 5.40
+    assert metrics["epsGrowth"] == pytest.approx((6.40 / 5.40) - 1)
+    assert metrics["fcfTTM"] == 115  # 30+28+35+22
+    assert metrics["peTTM"] == 25.0
+    assert metrics["peg"] == 1.5
+
+
+def test_yf_fundamentals_fewer_than_8_quarters():
+    """yf_fundamentals returns None for growth when fewer than 8 quarters available."""
+    class PartialTicker:
+        def __init__(self, symbol):
+            self.info = {}
+
+        @property
+        def quarterly_income_stmt(self):
+            # Only 4 quarters
+            dates = pd.date_range(end="2026-06-28", periods=4, freq="QS")
+            revenues = [100, 100, 110, 90]
+            net_incomes = [25, 24, 30, 21]
+            eps_values = [1.60, 1.55, 1.90, 1.35]
+            return pd.DataFrame({
+                "Total Revenue": revenues,
+                "Net Income": net_incomes,
+                "Diluted EPS": eps_values
+            }, index=dates).T
+
+        @property
+        def quarterly_balance_sheet(self):
+            return pd.DataFrame()
+
+        @property
+        def quarterly_cashflow(self):
+            return pd.DataFrame()
+
+    fundamentals, metrics = src.yf_fundamentals("AAPL", ticker_factory=PartialTicker)
+
+    # Growth should be None with only 4 quarters
+    assert metrics["revenueGrowth"] is None
+    assert metrics["epsGrowth"] is None
+    assert metrics["fcfTTM"] is None
+    assert len(fundamentals["quarters"]) == 4
+
+
+def test_yf_fundamentals_handles_nan_values():
+    """yf_fundamentals handles NaN values gracefully, returning None instead of NaN."""
+    class NaNTicker:
+        def __init__(self, symbol):
+            self.info = {}
+
+        @property
+        def quarterly_income_stmt(self):
+            # Include NaN values in eps to break epsGrowth calculation
+            dates = pd.date_range(end="2026-06-28", periods=8, freq="QS")
+            revenues = [100, 100, 110, 90, 95, 90, 95, 80]
+            net_incomes = [25, float('nan'), 30, 21, 22, 20, 24, 18]  # NaN in quarter 1
+            eps_values = [1.60, 1.55, float('nan'), 1.35, 1.40, 1.30, 1.55, 1.15]  # NaN in eps
+            return pd.DataFrame({
+                "Total Revenue": revenues,
+                "Net Income": net_incomes,
+                "Diluted EPS": eps_values
+            }, index=dates).T
+
+        @property
+        def quarterly_balance_sheet(self):
+            return pd.DataFrame()
+
+        @property
+        def quarterly_cashflow(self):
+            return pd.DataFrame()
+
+    fundamentals, metrics = src.yf_fundamentals("AAPL", ticker_factory=NaNTicker)
+
+    # Should not raise; netMargin for quarter with NaN should be None
+    assert fundamentals["quarters"][1]["netMargin"] is None
+    # epsGrowth should be None due to NaN in EPS
+    assert metrics["epsGrowth"] is None
+
+
+# ---------- yfinance analyst ----------
+
+def test_yf_analyst_with_populated_data():
+    """yf_analyst returns ratings, targets, and upgrades when data is populated."""
+    class AnalystTicker:
+        def __init__(self, symbol):
+            pass
+
+        @property
+        def analyst_price_targets(self):
+            return {"low": 180.0, "mean": 245.5, "high": 310.0}
+
+        @property
+        def recommendations_summary(self):
+            data = {
+                "strongBuy": [12],
+                "buy": [20],
+                "hold": [8],
+                "sell": [2],
+                "strongSell": [1]
+            }
+            return pd.DataFrame(data)
+
+        @property
+        def upgrades_downgrades(self):
+            dates = pd.date_range(end="2026-08-20", periods=5, freq="D")
+            data = {
+                "Firm": ["Morgan Stanley", "Goldman Sachs", "JPMorgan", "BofA", "Citigroup"],
+                "FromGrade": ["Equal-Weight", "Neutral", "Neutral", "Neutral", "Neutral"],
+                "ToGrade": ["Overweight", "Buy", "Buy", "Overweight", "Buy"],
+                "Action": ["upgrade", "upgrade", "upgrade", "upgrade", "upgrade"]
+            }
+            df = pd.DataFrame(data, index=dates)
+            return df
+
+    analyst = src.yf_analyst("AAPL", ticker_factory=AnalystTicker)
+
+    assert analyst["ratings"]["strongBuy"] == 12
+    assert analyst["ratings"]["buy"] == 20
+    assert analyst["ratings"]["hold"] == 8
+    assert analyst["targets"]["low"] == 180.0
+    assert analyst["targets"]["mean"] == 245.5
+    assert analyst["targets"]["high"] == 310.0
+    assert len(analyst["upgradesDowngrades"]) == 5
+    assert analyst["upgradesDowngrades"][0]["firm"] == "Morgan Stanley"
+    assert analyst["upgradesDowngrades"][0]["fromGrade"] == "Equal-Weight"
+
+
+def test_yf_analyst_with_empty_or_none_data():
+    """yf_analyst returns proper shape with empty/None data, no exceptions."""
+    class EmptyAnalystTicker:
+        def __init__(self, symbol):
+            pass
+
+        @property
+        def analyst_price_targets(self):
+            return None
+
+        @property
+        def recommendations_summary(self):
+            return None
+
+        @property
+        def upgrades_downgrades(self):
+            return None
+
+    analyst = src.yf_analyst("UNKNOWN", ticker_factory=EmptyAnalystTicker)
+
+    # Should return proper shape with zeros and empty lists
+    assert analyst["ratings"]["strongBuy"] == 0
+    assert analyst["ratings"]["buy"] == 0
+    assert analyst["ratings"]["hold"] == 0
+    assert analyst["ratings"]["sell"] == 0
+    assert analyst["ratings"]["strongSell"] == 0
+    assert analyst["targets"]["low"] is None
+    assert analyst["targets"]["mean"] is None
+    assert analyst["targets"]["high"] is None
+    assert analyst["upgradesDowngrades"] == []
+
+
+def test_yf_analyst_upgrades_downgrades_trimmed_to_10():
+    """yf_analyst trims upgrades_downgrades to at most 10 entries."""
+    class ManyUpgradesTicker:
+        def __init__(self, symbol):
+            pass
+
+        @property
+        def analyst_price_targets(self):
+            return {}
+
+        @property
+        def recommendations_summary(self):
+            return None
+
+        @property
+        def upgrades_downgrades(self):
+            # 15 upgrades
+            dates = pd.date_range(end="2026-08-20", periods=15, freq="D")
+            data = {
+                "Firm": [f"Firm{i}" for i in range(15)],
+                "FromGrade": ["Neutral"] * 15,
+                "ToGrade": ["Buy"] * 15,
+                "Action": ["upgrade"] * 15
+            }
+            return pd.DataFrame(data, index=dates)
+
+    analyst = src.yf_analyst("AAPL", ticker_factory=ManyUpgradesTicker)
+
+    # Should be trimmed to 10
+    assert len(analyst["upgradesDowngrades"]) == 10
