@@ -11,6 +11,8 @@ import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import truststore
+
 import analysis_sources
 import firestore_store
 import value_grade
@@ -382,6 +384,12 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def main():
+    # Patches the process-wide ssl module to use the OS's own certificate
+    # store instead of Python's bundled one — the same fix download_sp500.py
+    # already needed for outbound HTTPS on this platform. Must run before
+    # any HTTPS request (FMP, Alpha Vantage, yfinance, Firestore).
+    truststore.inject_into_ssl()
+
     parser = argparse.ArgumentParser(
         description="Stock analyzer server: static files + analysis API.")
     parser.add_argument("--port", type=int, default=8000)
