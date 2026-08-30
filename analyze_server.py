@@ -35,6 +35,38 @@ class NotFound(Exception):
     pass
 
 
+def _log_degradation(section, ticker, error, note=""):
+    """Every fallback/failure path logs — a silent `except: pass` makes a
+    genuine bug (a bad response shape, a permissions error) indistinguishable
+    from ordinary quota exhaustion, with nothing in the server log to tell
+    them apart."""
+    suffix = f"; {note}" if note else ""
+    print(f"WARNING: {section} fetch failed for {ticker} ({error}){suffix}")
+
+
+def _with_fallback(sections, key, ticker, primary, primary_label,
+                   fallback, fallback_label):
+    """Try `primary()`; on any exception, try `fallback()`; record which
+    source won (or that both failed) in sections[key]. Returns the winning
+    call's result, or None if both failed. Both callables take no args —
+    callers close over what they need."""
+    try:
+        result = primary()
+        sections[key] = primary_label
+        return result
+    except Exception as error:
+        _log_degradation(key, ticker, error, f"falling back to {fallback_label}")
+        try:
+            result = fallback()
+            sections[key] = fallback_label
+            return result
+        except Exception as fallback_error:
+            _log_degradation(key, ticker, fallback_error,
+                             "fallback also failed; marking unavailable")
+            sections[key] = "unavailable"
+            return None
+
+
 class BundleFetcher:
     """Fetches one full bundle. Unknown ticker raises LookupError; every
     other section degrades independently, recorded in meta.sections."""
@@ -56,12 +88,15 @@ class BundleFetcher:
             profile = self.src.parse_profile(
                 self.fmp.get("profile", symbol=ticker))
             snapshot.update({k: v for k, v in profile.items() if v})
-        except Exception:
-            pass                                  # yfinance already filled it
+            sections["profile"] = "fmp"
+        except Exception as error:
+            _log_degradation("profile", ticker, error,
+                             "using yfinance-only snapshot")
+            sections["profile"] = "yfinance"
 
-        fundamentals = metrics = None
-        try:
-            fundamentals, metrics = self.src.build_fundamentals(
+        result = _with_fallback(
+            sections, "fundamentals", ticker,
+            lambda: self.src.build_fundamentals(
                 self.fmp.get("income-statement", symbol=ticker,
                              period="quarter", limit=8),
                 self.fmp.get("balance-sheet-statement", symbol=ticker,
@@ -71,37 +106,32 @@ class BundleFetcher:
                 self.fmp.get("income-statement", symbol=ticker,
                              period="annual", limit=1),
                 self.fmp.get("ratios-ttm", symbol=ticker),
-                self.fmp.get("key-metrics-ttm", symbol=ticker))
-            sections["fundamentals"] = "fmp"
-        except Exception:
-            try:
-                fundamentals, metrics = self.src.yf_fundamentals(ticker)
-                sections["fundamentals"] = "yfinance"
-            except Exception:
-                sections["fundamentals"] = "unavailable"
+                self.fmp.get("key-metrics-ttm", symbol=ticker),
+                market_cap=snapshot.get("marketCap")),
+            "fmp",
+            lambda: self.src.yf_fundamentals(ticker),
+            "yfinance")
+        fundamentals, metrics = result if result is not None else (None, None)
         verdict = self.grader.compute_verdict(metrics) \
             if metrics is not None else None
 
-        analyst = None
-        try:
-            analyst = self.src.parse_analyst(
+        analyst = _with_fallback(
+            sections, "analyst", ticker,
+            lambda: self.src.parse_analyst(
                 self.fmp.get("price-target-consensus", symbol=ticker),
                 self.fmp.get("grades-consensus", symbol=ticker),
-                self.fmp.get("grades", symbol=ticker, limit=10))
-            sections["analyst"] = "fmp"
-        except Exception:
-            try:
-                analyst = self.src.yf_analyst(ticker)
-                sections["analyst"] = "yfinance"
-            except Exception:
-                sections["analyst"] = "unavailable"
+                self.fmp.get("grades", symbol=ticker, limit=10)),
+            "fmp",
+            lambda: self.src.yf_analyst(ticker),
+            "yfinance")
         if analyst:
             analyst["targets"]["current"] = snapshot.get("price")
 
         technicals = None
         try:
             close = self.src.yf_prices(ticker)
-        except Exception:
+        except Exception as error:
+            _log_degradation("technicals", ticker, error, "no price history")
             close = None
         if close is None:
             sections["technicals"] = "unavailable"
@@ -121,7 +151,9 @@ class BundleFetcher:
                                 time_period=200, series_type="close"),
                     close)
                 sections["technicals"] = "av"
-            except Exception:
+            except Exception as error:
+                _log_degradation("technicals", ticker, error,
+                                 "falling back to local computation")
                 technicals = self.src.compute_local_technicals(close)
                 sections["technicals"] = "local"
 
@@ -131,7 +163,8 @@ class BundleFetcher:
                 self.av.get("NEWS_SENTIMENT", tickers=ticker,
                             sort="LATEST", limit=50))
             sections["news"] = "ok"
-        except Exception:
+        except Exception as error:
+            _log_degradation("news", ticker, error)
             sections["news"] = "unavailable"
 
         return {"ticker": ticker,
@@ -173,7 +206,12 @@ class Analyzer:
     def __init__(self, store, fetcher, today=None):
         self.store = store
         self.fetcher = fetcher
-        self._today = today or (lambda: datetime.date.today().isoformat())
+        # UTC, not naive local time: every stored timestamp (_now_iso) is
+        # UTC-aware, so bucketing "today" by local calendar date would let
+        # the day-key and its own recorded fetchedAt disagree near midnight
+        # in any non-UTC deployment, corrupting "latest edition" tracking.
+        self._today = today or (
+            lambda: datetime.datetime.now(datetime.timezone.utc).date().isoformat())
         self._macro_lock = threading.Lock()
         # Per-(ticker, date) locks, created lazily. Guarded by one outer lock
         # so concurrent first-time lookups for different keys don't race on
@@ -236,7 +274,8 @@ class Analyzer:
                 try:
                     macro = self.fetcher.fetch_macro()
                     self.store.put_macro(today, macro)
-                except Exception:
+                except Exception as error:
+                    _log_degradation("macro", today, error)
                     macro = None
         return macro
 
@@ -292,25 +331,40 @@ def handle_api(path, query, analyzer):
 class Handler(SimpleHTTPRequestHandler):
     analyzer = None    # set in main()
 
-    # Never serve dotfiles (e.g. .env, .git/config) or the Firebase service
-    # account key over the static file path — both hold plaintext secrets
-    # that must never reach the browser.
-    _BLOCKED_FILENAME = "firebase-service-account.json"
+    # Only these extensions are ever servable as static files. An allowlist
+    # keeps "a new file appears in the repo root" default to *not served* —
+    # unlike a blocklist (which must be remembered and updated by hand
+    # every time a new secret-bearing file, like a second credentials
+    # file, is added), this also closes off Python source, directory
+    # listings, and anything else with no reason to be browsable.
+    _ALLOWED_STATIC_SUFFIXES = {".html", ".htm", ".css", ".js", ".csv",
+                                ".md", ".txt"}
 
     @classmethod
-    def _is_blocked_static_path(cls, path):
+    def _is_servable_static_path(cls, path):
         segments = [s for s in urllib.parse.unquote(path).split("/") if s]
-        if any(segment.startswith(".") for segment in segments):
-            return True
-        return bool(segments) and segments[-1] == cls._BLOCKED_FILENAME
+        if not segments or any(segment.startswith(".") for segment in segments):
+            return False
+        return Path(segments[-1]).suffix.lower() in cls._ALLOWED_STATIC_SUFFIXES
+
+    def _handle_static(self, super_method):
+        parsed = urllib.parse.urlsplit(self.path)
+        if not self._is_servable_static_path(parsed.path):
+            self.send_error(404, "File not found")
+            return
+        super_method()
+
+    def do_HEAD(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        if not parsed.path.startswith("/api/"):
+            return self._handle_static(super().do_HEAD)
+        # No API support for HEAD — treat it like an unknown path.
+        self.send_error(404, "File not found")
 
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
         if not parsed.path.startswith("/api/"):
-            if self._is_blocked_static_path(parsed.path):
-                self.send_error(404, "File not found")
-                return
-            return super().do_GET()
+            return self._handle_static(super().do_GET)
         try:
             status, payload = handle_api(
                 parsed.path, urllib.parse.parse_qs(parsed.query),

@@ -114,6 +114,70 @@ def test_build_fundamentals_tolerates_missing_pieces():
     assert fundamentals["annual"] is None
 
 
+def test_build_fundamentals_keeps_legitimate_zero_ratios():
+    """A debt-free company's real 0 must not be overwritten by the
+    balance-sheet fallback (the old `_first(...) or fallback` treated 0
+    as falsy/missing)."""
+    ratios = [{"currentRatioTTM": 0.0, "debtEquityRatioTTM": 0.0}]
+    balance = [{"totalCurrentAssets": 999, "totalCurrentLiabilities": 1,
+                "totalDebt": 999, "totalStockholdersEquity": 1}]
+    _, metrics = src.build_fundamentals(
+        INCOME_Q, balance, CASHFLOW_Q, INCOME_A, ratios, [])
+    assert metrics["currentRatio"] == 0.0
+    assert metrics["debtToEquity"] == 0.0
+
+
+def test_build_fundamentals_negative_equity_does_not_pass_debt_check():
+    """Negative equity must not produce a ratio at all — debt/negative
+    equity flips sign and can land under the '< 1.5' pass threshold,
+    making a distressed company (negative equity) look healthy."""
+    balance = [{"totalDebt": 500, "totalStockholdersEquity": -50}]
+    _, metrics = src.build_fundamentals(
+        INCOME_Q, balance, CASHFLOW_Q, INCOME_A, [], [])
+    assert metrics["debtToEquity"] is None
+
+
+def test_ttm_growth_resolves_camelcase_eps_and_alternate_revenue_key():
+    """_ttm_growth must use the same candidate-key list _quarter_row uses,
+    or a response using only the camelCase/alternate key silently loses
+    growth data even though every quarter's value is present and displayed."""
+    quarters = [{"date": f"q{i}", "totalRevenue": 100 + i, "epsDiluted": 1.0}
+                for i in range(8)]
+    fundamentals, metrics = src.build_fundamentals(
+        quarters, [], [], [], [], [])
+    assert fundamentals["quarters"][0]["revenue"] == 100
+    assert fundamentals["quarters"][0]["eps"] == 1.0
+    assert metrics["revenueGrowth"] is not None
+    assert metrics["epsGrowth"] is not None
+
+
+def test_build_fundamentals_falls_back_locally_when_fmp_ratios_gated():
+    """When FMP's ratios-ttm/key-metrics-ttm endpoints are gated (empty),
+    netMargin/roe/fcfYield must not silently go neutral — the same
+    quarters/balance data already fetched can derive them locally, just
+    like the yfinance fallback path already does."""
+    balance = [{"totalStockholdersEquity": 200}]
+    _, metrics = src.build_fundamentals(
+        INCOME_Q, balance, CASHFLOW_Q, INCOME_A, [], [],
+        market_cap=1000)
+    assert metrics["netMargin"] == pytest.approx(25 / 100)   # most recent quarter
+    assert metrics["roe"] == pytest.approx((25 + 24 + 30 + 21) / 200)
+    assert metrics["fcfYield"] == pytest.approx(115 / 1000)  # fcfTTM / market_cap
+
+
+def test_build_fundamentals_local_fallback_skipped_when_fmp_present():
+    """The fallback must never override a real (including gated-then-later-
+    available) FMP value — this is additive, not a replacement."""
+    ratios = [{"netProfitMarginTTM": 0.5}]
+    key_metrics = [{"roeTTM": 0.9, "freeCashFlowYieldTTM": 0.05}]
+    _, metrics = src.build_fundamentals(
+        INCOME_Q, BALANCE_Q, CASHFLOW_Q, INCOME_A, ratios, key_metrics,
+        market_cap=1000)
+    assert metrics["netMargin"] == 0.5
+    assert metrics["roe"] == 0.9
+    assert metrics["fcfYield"] == 0.05
+
+
 PRICE_TARGET = [{"targetLow": 180.0, "targetConsensus": 245.5, "targetHigh": 310.0}]
 GRADES_CONSENSUS = [{"strongBuy": 12, "buy": 20, "hold": 8, "sell": 2, "strongSell": 1}]
 GRADES = [{"date": "2026-08-20", "gradingCompany": "Morgan Stanley",
@@ -539,6 +603,27 @@ def test_parse_technicals_from_av_payloads():
     assert technicals["sma50"][-1] == {"date": "2026-08-28", "value": 230.5}
     assert len(technicals["prices"]) == 250          # trimmed from 300
     assert set(technicals["prices"][0]) == {"date", "close"}
+    assert technicals["indicatorsAsOf"] == "2026-08-28"
+    assert technicals["stale"] is False
+
+
+def test_parse_technicals_flags_staleness_when_av_lags_price_series():
+    """The fixtures above were hand-picked to exactly match the price
+    series' latest date, which can never catch Alpha Vantage's free-tier
+    data lagging yfinance's freshest close. This test uses deliberately
+    mismatched dates to prove the lag is surfaced, not silently dropped."""
+    stale_rsi = {"Technical Analysis: RSI": {"2026-08-26": {"RSI": "55.0"}}}
+    stale_macd = {"Technical Analysis: MACD": {
+        "2026-08-26": {"MACD": "1.0", "MACD_Signal": "0.5"}}}
+    stale_sma50 = {"Technical Analysis: SMA": {"2026-08-26": {"SMA": "220.0"}}}
+    stale_sma200 = {"Technical Analysis: SMA": {"2026-08-26": {"SMA": "200.0"}}}
+
+    technicals = src.parse_technicals(
+        stale_rsi, stale_macd, stale_sma50, stale_sma200, close_series())
+
+    assert technicals["prices"][-1]["date"] == "2026-08-28"
+    assert technicals["indicatorsAsOf"] == "2026-08-26"
+    assert technicals["stale"] is True
 
 
 def test_compute_local_technicals_shape_and_states():
@@ -556,6 +641,28 @@ def test_compute_local_technicals_shape_and_states():
     (75.0, "overbought"), (50.0, "neutral"), (25.0, "oversold")])
 def test_rsi_state_bands(value, state):
     assert src._rsi_state(value) == state
+
+
+def test_compute_local_technicals_flat_price_is_none_not_nan():
+    """A perfectly flat price series (e.g. a halted/illiquid stock) makes
+    RSI's gain and loss both 0, so gain/loss is 0/0 = NaN. That must
+    surface as None, not a literal NaN float that json.dumps would emit
+    as an invalid, non-standard JSON token."""
+    import math
+
+    import pandas as pd
+
+    dates = pd.date_range(end="2026-08-28", periods=60, freq="B")
+    flat = pd.Series([100.0] * 60, index=dates)
+    technicals = src.compute_local_technicals(flat)
+    assert technicals["rsi"]["value"] is None
+    assert technicals["rsi"]["state"] is None
+    # Never a raw float NaN anywhere in the payload (json.dumps would
+    # otherwise emit the bare, invalid `NaN` token).
+    assert not any(isinstance(v, float) and math.isnan(v)
+                  for v in (technicals["rsi"]["value"],
+                           technicals["macd"]["macd"],
+                           technicals["macd"]["signal"]))
 
 
 def econ(values):   # newest first, monthly
@@ -582,3 +689,22 @@ def test_parse_macro_missing_series_is_none():
     macro = src.parse_macro({}, {}, None, econ([]))
     assert macro == {"treasury10y": None, "fedFunds": None,
                      "cpiYoY": None, "unemployment": None}
+
+
+def test_cpi_yoy_tolerates_a_missing_month_by_matching_calendar_date():
+    """If a calendar month is entirely absent from the feed (a real gap,
+    not just a malformed value), every later index shifts by one — the
+    fixed list-position lookup (`values[12]`) would then land on the
+    WRONG month. Matching by calendar date must still find the true
+    12-months-back value regardless of where it sits in the list."""
+    values = [
+        ("2026-07-01", 320.0), ("2026-06-01", 321.0), ("2026-05-01", 322.0),
+        # 2026-04 missing entirely — a real gap, not a parse failure
+        ("2026-03-01", 324.0), ("2026-02-01", 325.0), ("2026-01-01", 326.0),
+        ("2025-12-01", 300.0), ("2025-11-01", 301.0), ("2025-10-01", 302.0),
+        ("2025-09-01", 303.0), ("2025-08-01", 304.0),
+        ("2025-07-01", 310.0),   # true 12-months-back value
+        ("2025-06-01", 305.0),   # sits at old code's values[12] — wrong
+    ]
+    macro = src.parse_macro({}, econ(values), {}, {})
+    assert macro["cpiYoY"] == pytest.approx((320.0 / 310.0 - 1) * 100)

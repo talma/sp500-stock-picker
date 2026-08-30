@@ -66,7 +66,7 @@
   .grade { font-size: 64px; font-weight: bold; border: 4px solid var(--ink);
       padding: 4px 22px; }
   .grade.A, .grade.B { color: var(--good); border-color: var(--good); }
-  .grade.C { color: var(--neutral); border-color: var(--neutral); }
+  .grade.C, .grade.NA { color: var(--neutral); border-color: var(--neutral); }
   .grade.D, .grade.F { color: var(--bad); border-color: var(--bad); }
   .check-pass::before { content: "✓ "; color: var(--good); }
   .check-fail::before { content: "✗ "; color: var(--bad); }
@@ -198,7 +198,15 @@ async function api(path) {
   let response;
   try { response = await fetch(path); }
   catch { throw new Error("Cannot reach the API — is analyze_server.py running?"); }
-  const payload = await response.json().catch(() => ({}));
+  let payload;
+  try {
+    payload = await response.json();
+  } catch (parseError) {
+    // A malformed body (e.g. a stray NaN token) must surface as an error,
+    // not silently become {} and render as an empty, unexplained report.
+    throw new Error(`Server returned invalid JSON (HTTP ${response.status}): ` +
+      parseError.message);
+  }
   if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
   return payload;
 }
@@ -318,6 +326,11 @@ function unavailableNote(target, sections, key) {
     `(${esc(sections?.[key] ?? "source error / quota exhausted")}).</div>`;
 }
 
+function unavailableSection(target, canvas, sections, key) {
+  unavailableNote(target, sections, key);
+  if (canvas) prepCanvas(canvas);
+}
+
 function render(bundle, isHistorical) {
   $("report").classList.remove("hidden");
   const sections = bundle.meta?.sections || {};
@@ -328,7 +341,7 @@ function render(bundle, isHistorical) {
   renderAnalyst(bundle.analyst, sections);
   renderTechnicals(bundle.technicals, sections);
   renderNews(bundle.news, sections);
-  renderMacro(bundle.macro);
+  renderMacro(bundle.macro, sections);
   renderFootnotes(bundle);
   $("report").scrollIntoView({behavior: "smooth"});
 }
@@ -341,7 +354,7 @@ function renderSnapshot(bundle, isHistorical) {
     <span class="kv">${esc(s.sector ?? "")}${s.industry ? " · " +
       esc(s.industry) : ""}</span>
     <span class="kv">price <b>$${fmtNum(s.price)}</b>
-      <span class="${change >= 0 ? "up" : "down"}">${change == null ? "" :
+      <span class="${change == null ? "" : (change >= 0 ? "up" : "down")}">${change == null ? "" :
       (change >= 0 ? "▲" : "▼") + fmtNum(Math.abs(change)) + "%"}</span></span>
     <span class="kv">mkt cap <b>${fmtMoney(s.marketCap)}</b></span>
     <span class="kv">P/E <b>${fmtNum(s.peRatio)}</b></span>
@@ -357,9 +370,13 @@ function renderSnapshot(bundle, isHistorical) {
 
 function renderVerdict(verdict) {
   if (!verdict) return unavailableNote($("verdict-body"), null, null);
+  // The displayed grade ("N/A") isn't always a valid bare CSS class token
+  // (a literal "/" can't be targeted by a plain class selector) — the
+  // class gets the letters only, the visible text keeps the real value.
+  const gradeClass = (verdict.grade || "").replace(/[^A-Za-z]/g, "");
   $("verdict-body").innerHTML = `
     <div class="verdict-card">
-      <span class="grade ${esc(verdict.grade)}">${esc(verdict.grade)}</span>
+      <span class="grade ${esc(gradeClass)}">${esc(verdict.grade)}</span>
       <div><p style="margin:0 0 6px">${esc(verdict.summary)}</p>
       <span class="mono" style="font-size:12px">${verdict.passes} of
         ${verdict.evaluated} evaluated checks pass</span></div>
@@ -403,8 +420,8 @@ function renderValue(bundle, sections) {
   const body = $("value-body");
   const checks = bundle.verdict?.checks;
   const ratios = bundle.fundamentals?.ratios || {};
-  if (!checks) { unavailableNote(body, sections, "fundamentals");
-                 prepCanvas($("quarters-chart")); return; }
+  if (!checks) return unavailableSection(body, $("quarters-chart"),
+                                        sections, "fundamentals");
   const row = c => `<tr><td class="check-${c.result}">${esc(c.label)}</td>
     <td class="num">${fmtNum(c.value, 3)}</td>
     <td class="mono" style="font-size:11px">${esc(c.threshold)}</td></tr>`;
@@ -439,9 +456,14 @@ function renderAnalyst(analyst, sections) {
     const mark = (v, glyph, cls) => v == null ? "" :
       `<span style="position:absolute;left:${pos(v)}%" class="${cls}"
         title="$${fmtNum(v)}">${glyph}</span>`;
+    // Color the current-price marker by where it actually sits relative
+    // to the analyst consensus, not a fixed "down" (bearish) regardless
+    // of whether the price is above or below the target.
+    const currentCls = (t.current == null || t.mean == null) ? "" :
+      (t.current >= t.mean ? "up" : "down");
     return `<div class="mono" style="position:relative;height:22px;
       border-bottom:1px solid var(--rule);margin:6px 0">
-      ${mark(t.mean, "▼", "")}${mark(t.current, "●", "down")}</div>
+      ${mark(t.mean, "▼", "")}${mark(t.current, "●", currentCls)}</div>
       <div class="mono" style="display:flex;justify-content:space-between;
       font-size:12px"><span>low $${fmtNum(t.low)}</span>
       <span>consensus $${fmtNum(t.mean)} · current $${fmtNum(t.current)}</span>
@@ -466,8 +488,8 @@ function renderAnalyst(analyst, sections) {
 
 function renderTechnicals(technicals, sections) {
   const body = $("technicals-body");
-  if (!technicals) { unavailableNote(body, sections, "technicals");
-                     prepCanvas($("price-chart")); return; }
+  if (!technicals) return unavailableSection(body, $("price-chart"),
+                                            sections, "technicals");
   const priceDates = (technicals.prices || []).map(p => p.date);
   const align = series => {
     const byDate = Object.fromEntries((series || [])
@@ -482,11 +504,18 @@ function renderTechnicals(technicals, sections) {
      points: align(technicals.sma200)},
   ], v => "$" + fmtNum(v, 0));
   const rsi = technicals.rsi || {}, macd = technicals.macd || {};
+  // Alpha Vantage's free tier can lag yfinance's freshest close by a day
+  // or more — show it instead of implying the indicators are as current
+  // as the price chart above them.
+  const staleness = technicals.stale
+    ? ` · <span class="unavailable">indicators as of
+        ${esc(technicals.indicatorsAsOf)}, price chart is newer</span>`
+    : "";
   body.innerHTML = `<p class="mono" style="font-size:14px">
     RSI-14 <b>${fmtNum(rsi.value, 1)}</b> — ${esc(rsi.state ?? "—")} ·
     MACD(12/26/9) <b>${fmtNum(macd.macd, 3)}</b> vs signal
     ${fmtNum(macd.signal, 3)} — ${esc(macd.state ?? "—")} ·
-    source: ${esc(sections.technicals ?? "—")}</p>`;
+    source: ${esc(sections.technicals ?? "—")}${staleness}</p>`;
 }
 
 function renderNews(news, sections) {
@@ -509,11 +538,13 @@ function renderNews(news, sections) {
     <th>Sentiment</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
-function renderMacro(macro) {
+function renderMacro(macro, sections) {
   const body = $("macro-body");
-  if (!macro) { body.innerHTML =
-    `<span class="unavailable">Macro unavailable (quota).</span>`;
-    $("macro-asof").textContent = ""; return; }
+  if (!macro) {
+    unavailableNote(body, sections, "macro");
+    $("macro-asof").textContent = "";
+    return;
+  }
   body.innerHTML = `
     <span>10Y Treasury <b>${fmtPct(macro.treasury10y)}</b></span>
     <span>Fed funds <b>${fmtPct(macro.fedFunds)}</b></span>

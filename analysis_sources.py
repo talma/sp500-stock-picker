@@ -29,6 +29,19 @@ def _first(row, *keys):
     return None
 
 
+_FIELD_CANDIDATES = {
+    "revenue": ("revenue", "totalRevenue"),
+    "eps": ("eps", "epsdiluted", "epsDiluted"),
+}
+
+
+def _first_field(row, field):
+    """Resolve `field` from a raw FMP quarter row via the same candidate-key
+    list everywhere it's read, so naming drift is handled consistently
+    instead of only in whichever function happened to be written first."""
+    return _first(row, *_FIELD_CANDIDATES.get(field, (field,)))
+
+
 class GatedEndpoint(Exception):
     """FMP endpoint not available on the current (free) plan."""
 
@@ -70,27 +83,31 @@ def parse_profile(rows):
 
 
 def _quarter_row(row):
-    revenue = _first(row, "revenue", "totalRevenue")
+    revenue = _first_field(row, "revenue")
     net_income = _first(row, "netIncome")
     return {"date": _first(row, "date"),
             "revenue": revenue,
             "netIncome": net_income,
-            "eps": _first(row, "eps", "epsdiluted", "epsDiluted"),
+            "eps": _first_field(row, "eps"),
             "netMargin": (net_income / revenue) if revenue and net_income is not None else None}
 
 
-def _ttm_growth(quarters, field):
-    """(sum of quarters 0-3) / (sum of quarters 4-7) - 1, or None."""
-    values = [_first(q, field, "epsdiluted" if field == "eps" else field)
-              for q in quarters[:8]]
+def _growth_ratio(values):
+    """TTM growth from up to 8 values, newest-first: (sum of first 4) /
+    (sum of next 4) - 1. None if fewer than 8, any is missing, or the
+    denominator is zero."""
     if len(values) < 8 or any(v is None for v in values):
         return None
     recent, prior = sum(values[:4]), sum(values[4:8])
     return (recent / prior - 1) if prior else None
 
 
+def _ttm_growth(quarters, field):
+    return _growth_ratio([_first_field(q, field) for q in quarters[:8]])
+
+
 def build_fundamentals(income_q, balance_q, cashflow_q, income_a,
-                       ratios_ttm, key_metrics_ttm):
+                       ratios_ttm, key_metrics_ttm, market_cap=None):
     income_q = income_q or []
     quarters = [_quarter_row(row) for row in income_q[:4]]
     annual_row = (income_a or [None])[0]
@@ -109,23 +126,50 @@ def build_fundamentals(income_q, balance_q, cashflow_q, income_a,
         v is not None for v in fcf_values) else None
 
     pe = _first(ratios, "peRatioTTM", "priceToEarningsRatioTTM")
-    current_ratio = _first(ratios, "currentRatioTTM") or _current_ratio(balance)
-    debt_equity = _first(ratios, "debtEquityRatioTTM", "debtToEquityTTM") \
-        or _debt_equity(balance)
+    # `or` would treat a legitimate 0 (e.g. a debt-free company) as missing
+    # and silently overwrite it with the balance-sheet fallback.
+    current_ratio_raw = _first(ratios, "currentRatioTTM")
+    current_ratio = current_ratio_raw if current_ratio_raw is not None \
+        else _current_ratio(balance)
+    debt_equity_raw = _first(ratios, "debtEquityRatioTTM", "debtToEquityTTM")
+    debt_equity = debt_equity_raw if debt_equity_raw is not None \
+        else _debt_equity(balance)
 
     year_ago = income_q[4] if len(income_q) > 4 else None
+    equity = _first(balance, "totalStockholdersEquity", "totalEquity")
+
+    # The three fallbacks below only engage when FMP's ratios-ttm/
+    # key-metrics-ttm endpoints are gated (a documented free-tier risk) —
+    # the same reports already fetched for `quarters`/`balance` carry
+    # enough data to derive these locally instead of silently grading
+    # them "neutral" while the identical yfinance-fallback path would
+    # have produced a real value.
+    net_margin = _first(ratios, "netProfitMarginTTM", "netIncomePerRevenueTTM")
+    if net_margin is None and quarters:
+        net_margin = quarters[0]["netMargin"]
+
+    roe = _first(key_metrics, "roeTTM", "returnOnEquityTTM")
+    if roe is None and equity is not None and equity > 0 and len(income_q) >= 4:
+        ttm_net_income = [_first(q, "netIncome") for q in income_q[:4]]
+        if all(v is not None for v in ttm_net_income):
+            roe = sum(ttm_net_income) / equity
+
+    fcf_yield = _first(key_metrics, "freeCashFlowYieldTTM")
+    if fcf_yield is None and fcf_ttm is not None and market_cap:
+        fcf_yield = fcf_ttm / market_cap
+
     metrics = {
         "revenueGrowth": _ttm_growth(income_q, "revenue"),
         "epsGrowth": _ttm_growth(income_q, "eps"),
-        "netMargin": _first(ratios, "netProfitMarginTTM", "netIncomePerRevenueTTM"),
+        "netMargin": net_margin,
         "netMarginYearAgo": _quarter_row(year_ago)["netMargin"] if year_ago else None,
-        "roe": _first(key_metrics, "roeTTM", "returnOnEquityTTM"),
+        "roe": roe,
         "fcfTTM": fcf_ttm,
         "debtToEquity": debt_equity,
         "currentRatio": current_ratio,
         "peTTM": pe,
         "peg": _first(ratios, "pegRatioTTM", "priceEarningsToGrowthRatioTTM"),
-        "fcfYield": _first(key_metrics, "freeCashFlowYieldTTM"),
+        "fcfYield": fcf_yield,
     }
     fundamentals = {
         "quarters": quarters,
@@ -147,13 +191,22 @@ def build_fundamentals(income_q, balance_q, cashflow_q, income_a,
 def _current_ratio(balance):
     assets = _first(balance, "totalCurrentAssets")
     liabilities = _first(balance, "totalCurrentLiabilities")
-    return (assets / liabilities) if assets and liabilities else None
+    # `liabilities` must stay a truthiness check (guards divide-by-zero);
+    # `assets` must not, since a legitimate 0 shouldn't count as missing.
+    if assets is None or not liabilities:
+        return None
+    return assets / liabilities
 
 
 def _debt_equity(balance):
     debt = _first(balance, "totalDebt")
     equity = _first(balance, "totalStockholdersEquity", "totalEquity")
-    return (debt / equity) if debt is not None and equity else None
+    # Negative equity must not produce a ratio: debt/equity with equity < 0
+    # flips sign and can land under the "< 1.5" pass threshold, making a
+    # company in genuine financial distress (negative equity) look healthy.
+    if debt is None or equity is None or equity <= 0:
+        return None
+    return debt / equity
 
 
 def parse_analyst(price_target_rows, grades_consensus_rows, grades_rows):
@@ -238,12 +291,6 @@ def yf_fundamentals(ticker, ticker_factory=yf.Ticker):
                              "eps": eps,
                              "netMargin": margins[index]})
 
-    def growth(values):
-        if len(values) < 8 or any(v is None for v in values):
-            return None
-        prior = sum(values[4:8])
-        return (sum(values[:4]) / prior - 1) if prior else None
-
     fcf_values = [_df_value(cashflow, "Free Cash Flow", i) for i in range(4)]
     fcf_ttm = sum(fcf_values) if all(v is not None for v in fcf_values) \
         and len(fcf_values) == 4 else None
@@ -252,21 +299,30 @@ def yf_fundamentals(ticker, ticker_factory=yf.Ticker):
     debt = _df_value(balance, "Total Debt")
     assets = _df_value(balance, "Current Assets")
     liabilities = _df_value(balance, "Current Liabilities")
-    net_income_ttm = sum(v for v in (_df_value(income, "Net Income", i)
-                                     for i in range(4)) if v is not None) or None
+    net_income_values = [_df_value(income, "Net Income", i) for i in range(4)]
+    net_income_ttm = (sum(net_income_values)
+                      if all(v is not None for v in net_income_values) else None)
 
     metrics = {
-        "revenueGrowth": growth(revenues),
-        "epsGrowth": growth(eps_values),
+        "revenueGrowth": _growth_ratio(revenues),
+        "epsGrowth": _growth_ratio(eps_values),
         "netMargin": margins[0] if margins else None,
         "netMarginYearAgo": margins[4] if len(margins) > 4 else None,
-        "roe": (net_income_ttm / equity) if net_income_ttm and equity else None,
+        # Negative equity must not produce a ratio here either — see
+        # _debt_equity's comment for why the sign matters, not just the
+        # divide-by-zero guard.
+        "roe": (net_income_ttm / equity)
+            if net_income_ttm is not None and equity is not None and equity > 0
+            else None,
         "fcfTTM": fcf_ttm,
-        "debtToEquity": (debt / equity) if debt is not None and equity else None,
-        "currentRatio": (assets / liabilities) if assets and liabilities else None,
+        "debtToEquity": (debt / equity)
+            if debt is not None and equity is not None and equity > 0 else None,
+        "currentRatio": (assets / liabilities)
+            if assets is not None and liabilities else None,
         "peTTM": info.get("trailingPE"),
         "peg": info.get("pegRatio") or info.get("trailingPegRatio"),
-        "fcfYield": (fcf_ttm / market_cap) if fcf_ttm and market_cap else None,
+        "fcfYield": (fcf_ttm / market_cap)
+            if fcf_ttm is not None and market_cap else None,
     }
     fundamentals = {"quarters": quarters, "annual": None,
                     "ratios": {"peTTM": metrics["peTTM"], "peg": metrics["peg"],
@@ -418,21 +474,50 @@ def parse_technicals(rsi_payload, macd_payload, sma50_payload,
     rsi_pairs = _av_series(rsi_payload, "Technical Analysis: RSI", "RSI")
     rsi_value = rsi_pairs[-1][1] if rsi_pairs else None
     macd_block = (macd_payload or {}).get("Technical Analysis: MACD") or {}
-    macd_value = signal_value = None
+    macd_value = signal_value = macd_date = None
     if macd_block:
-        latest = macd_block[max(macd_block)]
+        macd_date = max(macd_block)
+        latest = macd_block[macd_date]
         macd_value = float(latest["MACD"])
         signal_value = float(latest["MACD_Signal"])
+    sma50_pairs = _av_series(sma50_payload, "Technical Analysis: SMA", "SMA")
+    sma200_pairs = _av_series(sma200_payload, "Technical Analysis: SMA", "SMA")
+    prices = _prices_from_close(close)
+
+    # Alpha Vantage's free tier commonly lags yfinance's freshest close by
+    # a day or more, so the SMA/RSI/MACD overlay can silently stop short
+    # of "today" with no error surfaced anywhere. Compute and expose the
+    # actual latest indicator date so the frontend can show it instead of
+    # implying the indicators are as fresh as the price chart.
+    indicator_dates = [d for d, _ in (rsi_pairs[-1:] + sma50_pairs[-1:]
+                                      + sma200_pairs[-1:])]
+    if macd_date:
+        indicator_dates.append(macd_date)
+    indicators_as_of = max(indicator_dates) if indicator_dates else None
+    prices_as_of = prices[-1]["date"] if prices else None
+
     return {
-        "prices": _prices_from_close(close),
-        "sma50": _trim_series(_av_series(sma50_payload,
-                                         "Technical Analysis: SMA", "SMA")),
-        "sma200": _trim_series(_av_series(sma200_payload,
-                                          "Technical Analysis: SMA", "SMA")),
+        "prices": prices,
+        "sma50": _trim_series(sma50_pairs),
+        "sma200": _trim_series(sma200_pairs),
         "rsi": {"value": rsi_value, "state": _rsi_state(rsi_value)},
         "macd": {"macd": macd_value, "signal": signal_value,
                  "state": _macd_state(macd_value, signal_value)},
+        "indicatorsAsOf": indicators_as_of,
+        "stale": bool(indicators_as_of and prices_as_of
+                     and indicators_as_of < prices_as_of),
     }
+
+
+def _last_or_none(series):
+    """Last value of `series`, or None if empty or NaN (e.g. a flat/
+    illiquid price series produces a 0/0 RSI). A bare NaN would otherwise
+    reach json.dumps (default allow_nan=True) and serialize as the
+    non-standard `NaN` token, breaking every JSON parser downstream."""
+    if not len(series):
+        return None
+    value = float(series.iloc[-1])
+    return None if value != value else value
 
 
 def compute_local_technicals(close):
@@ -451,19 +536,22 @@ def compute_local_technicals(close):
         return [(str(index.date()), round(float(value), 4))
                 for index, value in clean.items()]
 
-    rsi_value = round(float(rsi.iloc[-1]), 2) if len(rsi) else None
-    macd_value = round(float(macd.iloc[-1]), 4) if len(macd) else None
-    signal_value = round(float(signal.iloc[-1]), 4) if len(signal) else None
-    # Determine MACD state from raw values before rounding to preserve precision
-    macd_state = _macd_state(macd.iloc[-1] if len(macd) else None,
-                             signal.iloc[-1] if len(signal) else None)
+    rsi_raw = _last_or_none(rsi)
+    macd_raw = _last_or_none(macd)
+    signal_raw = _last_or_none(signal)
+    rsi_value = round(rsi_raw, 2) if rsi_raw is not None else None
+    macd_value = round(macd_raw, 4) if macd_raw is not None else None
+    signal_value = round(signal_raw, 4) if signal_raw is not None else None
     return {
         "prices": _prices_from_close(close),
         "sma50": _trim_series(series_pairs(close.rolling(50).mean())),
         "sma200": _trim_series(series_pairs(close.rolling(200).mean())),
         "rsi": {"value": rsi_value, "state": _rsi_state(rsi_value)},
         "macd": {"macd": macd_value, "signal": signal_value,
-                 "state": macd_state},
+                 # State from the raw (unrounded) values — rounding both
+                 # to 4dp can make a genuinely-bullish macd > signal
+                 # collapse to an apparent tie (see test fixture).
+                 "state": _macd_state(macd_raw, signal_raw)},
     }
 
 
@@ -485,10 +573,21 @@ def _cpi_yoy(payload):
             values.append((row["date"], float(row["value"])))
         except (KeyError, TypeError, ValueError):
             continue
-    if len(values) < 13:
+    if not values:
         return None
-    latest, year_ago = values[0][1], values[12][1]
-    return (latest / year_ago - 1) * 100 if year_ago else None
+    latest_date, latest_value = values[0]
+    # Match "12 months prior" by calendar date, not list position: any
+    # skipped/unparsable row (e.g. a government placeholder like ".")
+    # would otherwise shift every later index, silently comparing against
+    # the wrong month.
+    try:
+        target_prefix = f"{int(latest_date[:4]) - 1}-{latest_date[5:7]}"
+    except (ValueError, IndexError):
+        return None
+    for date, value in values[1:]:
+        if date.startswith(target_prefix):
+            return (latest_value / value - 1) * 100 if value else None
+    return None
 
 
 def parse_macro(treasury_payload, cpi_payload, fedfunds_payload,

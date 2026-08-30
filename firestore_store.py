@@ -1,6 +1,8 @@
 """Firestore persistence with an in-memory fallback. All timestamps are
 ISO-8601 UTC strings so docs stay JSON-serializable and comparable."""
+import copy
 import datetime
+import threading
 
 
 def _now_iso():
@@ -29,13 +31,17 @@ class MemoryBackend:
         self.registry = {}
 
     def get_daily(self, ticker, date):
-        return self.daily.get((ticker, date))
+        # Deep copy: callers may hold this bundle across concurrent requests,
+        # and the stored object must never be aliased to a caller-mutable one.
+        bundle = self.daily.get((ticker, date))
+        return copy.deepcopy(bundle) if bundle is not None else None
 
     def put_daily(self, ticker, date, bundle):
         self.daily[(ticker, date)] = bundle
 
     def get_macro(self, date):
-        return self.macro.get(date)
+        doc = self.macro.get(date)
+        return copy.deepcopy(doc) if doc is not None else None
 
     def put_macro(self, date, doc):
         self.macro[date] = doc
@@ -45,7 +51,12 @@ class MemoryBackend:
             self.registry.get(ticker), ticker, name, sector, date, summary)
 
     def get_registry(self, ticker):
-        return self.registry.get(ticker)
+        # Deep copy: a caller iterating/serializing the returned "summaries"
+        # dict must never race a concurrent upsert_registry mutating the
+        # live stored dict (RuntimeError: dictionary changed size during
+        # iteration) or otherwise observe a partially-updated document.
+        doc = self.registry.get(ticker)
+        return copy.deepcopy(doc) if doc is not None else None
 
     def list_registry(self):
         rows = [{"ticker": d["ticker"], "name": d.get("name"),
@@ -110,6 +121,7 @@ class FirestoreBackend:
 
 class Store:
     def __init__(self, project_id=None, backend=None):
+        self._swap_lock = threading.Lock()
         if backend is not None:
             self.backend = backend
             self.kind = "memory"
@@ -127,13 +139,22 @@ class Store:
         try:
             return getattr(self.backend, method)(*args)
         except Exception as error:
-            if self.kind != "firestore":
-                raise
-            print(f"WARNING: Firestore error ({error}); "
-                  "switching to in-memory store")
-            self.backend = MemoryBackend()
-            self.kind = "memory"
-            return getattr(self.backend, method)(*args)
+            # The swap itself must be atomic: without this lock, two threads
+            # racing the same Firestore outage can each install their own
+            # fresh MemoryBackend, and the second one silently discards the
+            # first's writes (lost update). Guarding the check-then-swap
+            # ensures only one thread ever performs it; every other thread
+            # that lands here — whether it caused the swap or arrives after
+            # it — retries its own call against whatever backend is current,
+            # instead of incorrectly re-raising its own original exception.
+            with self._swap_lock:
+                if self.kind == "firestore":
+                    print(f"WARNING: Firestore error ({error}); "
+                          "switching to in-memory store")
+                    self.backend = MemoryBackend()
+                    self.kind = "memory"
+                backend = self.backend
+            return getattr(backend, method)(*args)
 
     def get_daily(self, ticker, date):
         return self._safe("get_daily", ticker, date)

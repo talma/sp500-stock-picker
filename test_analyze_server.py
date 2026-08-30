@@ -80,6 +80,82 @@ def test_store_switches_to_memory_when_backend_raises(capsys):
     assert "WARNING" in capsys.readouterr().out
 
 
+def test_get_daily_returns_copy_not_aliased_to_store():
+    store = memory_store()
+    store.put_daily("AAPL", "2026-08-29", {"meta": {"fromStore": False}})
+    first = store.get_daily("AAPL", "2026-08-29")
+    first["meta"]["fromStore"] = True          # mutate the caller's copy
+    second = store.get_daily("AAPL", "2026-08-29")
+    assert second["meta"]["fromStore"] is False    # store unaffected
+
+
+def test_get_registry_returns_copy_safe_during_concurrent_mutation():
+    store = memory_store()
+    store.upsert_registry("AAPL", "Apple Inc.", None, "2026-08-29", SUMMARY)
+
+    doc = store.get_registry("AAPL")
+    doc["summaries"]["2026-08-29"]["grade"] = "Z"    # mutate caller's copy
+    fresh = store.get_registry("AAPL")
+    assert fresh["summaries"]["2026-08-29"]["grade"] == "B"
+
+    # Iterating a returned copy while a separate upsert inserts a new date
+    # must not raise "dictionary changed size during iteration" — the two
+    # are now independent objects, not aliases of the same live dict.
+    doc2 = store.get_registry("AAPL")
+    for _ in doc2["summaries"]:
+        store.upsert_registry("AAPL", "Apple Inc.", None,
+                              "2026-08-28", dict(SUMMARY, grade="C"))
+    assert "2026-08-28" in store.get_registry("AAPL")["summaries"]
+
+
+def test_get_macro_returns_independent_copy():
+    store = memory_store()
+    store.put_macro("2026-08-29", {"treasury10y": 4.25})
+    first = store.get_macro("2026-08-29")
+    first["treasury10y"] = 999.0
+    assert store.get_macro("2026-08-29")["treasury10y"] == 4.25
+
+
+class FlakyBackend:
+    """Always raises, with a small delay so concurrent callers are
+    reliably in-flight at the same time — widens the race window this
+    test needs to exercise the swap-lock fix."""
+
+    def __getattr__(self, name):
+        def boom(*args, **kwargs):
+            import time
+            time.sleep(0.01)
+            raise ConnectionError("firestore down")
+        return boom
+
+
+def test_safe_swap_is_atomic_under_concurrent_failures():
+    import threading
+
+    store = Store(backend=FlakyBackend())
+    store.kind = "firestore"   # simulate a live backend that starts failing
+    backends_seen = {}
+
+    def worker(ticker):
+        store.put_daily(ticker, "2026-08-29", {"ticker": ticker})
+        backends_seen[ticker] = store.backend
+
+    t1 = threading.Thread(target=worker, args=("AAPL",))
+    t2 = threading.Thread(target=worker, args=("MSFT",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=2)
+    t2.join(timeout=2)
+
+    assert store.kind == "memory"
+    # Both writes must land on the SAME backend instance — an unlocked
+    # swap would let each thread install its own MemoryBackend, silently
+    # discarding whichever write happened first (lost update).
+    assert backends_seen["AAPL"] is backends_seen["MSFT"]
+    assert store.get_daily("AAPL", "2026-08-29") is not None
+    assert store.get_daily("MSFT", "2026-08-29") is not None
+
+
 # ==================== Task 5: analyze_server.py ====================
 
 import types
@@ -312,6 +388,7 @@ def test_bundle_fetcher_degrades_each_section_independently():
     fetcher = BundleFetcher(GatedFMP(), QuotaAV(), src=stub_src())
     bundle = fetcher.fetch("AAPL")
     sections = bundle["meta"]["sections"]
+    assert sections["profile"] == "yfinance"     # was previously unrecorded
     assert sections["fundamentals"] == "yfinance"
     assert sections["analyst"] == "yfinance"
     assert sections["news"] == "unavailable"
@@ -322,6 +399,50 @@ def test_bundle_fetcher_degrades_each_section_independently():
     assert bundle["verdict"]["grade"]            # graded from yfinance metrics
     assert bundle["snapshot"]["price"] == 230.0
     assert bundle["analyst"]["targets"]["current"] == 230.0
+
+
+def test_bundle_fetcher_logs_every_fallback_not_silent(capsys):
+    """Previously every degradation swallowed its exception with no trace
+    (`except Exception: pass`), making a real bug indistinguishable from
+    ordinary quota exhaustion. Every fallback must now log."""
+    fetcher = BundleFetcher(GatedFMP(), QuotaAV(), src=stub_src())
+    fetcher.fetch("AAPL")
+    output = capsys.readouterr().out
+    for section in ("profile", "fundamentals", "analyst", "technicals",
+                    "news"):
+        assert f"WARNING: {section}" in output, \
+            f"expected a logged WARNING for {section}, got: {output!r}"
+
+
+def test_bundle_fetcher_threads_market_cap_into_build_fundamentals():
+    """build_fundamentals' local fallback (netMargin/roe/fcfYield when
+    FMP's ratio endpoints are gated) needs market cap, which only the
+    already-fetched yfinance snapshot has — confirm it's actually wired
+    through, not left at the function's default of None."""
+    captured = {}
+
+    def spy_build_fundamentals(*args, **kwargs):
+        captured["market_cap"] = kwargs.get("market_cap")
+        return {"quarters": [], "annual": None, "ratios": {}}, {}
+
+    class FMPThatReachesBuildFundamentals:
+        calls_used = 0
+        def get(self, endpoint, **params):
+            return []   # empty payload, not gated — reaches build_fundamentals
+
+    fetcher = BundleFetcher(
+        FMPThatReachesBuildFundamentals(), QuotaAV(),
+        src=stub_src(build_fundamentals=spy_build_fundamentals))
+    fetcher.fetch("AAPL")
+    assert captured["market_cap"] == 3.5e12   # from stub_src's yf_quote
+
+
+def test_analyzer_today_uses_utc_not_local_calendar_date():
+    import datetime as dt
+
+    analyzer = Analyzer(Store(backend=MemoryBackend()), StubFetcher())
+    assert analyzer._today() == \
+        dt.datetime.now(dt.timezone.utc).date().isoformat()
 
 
 def test_local_technicals_flag_skips_av_technical_calls():
@@ -506,3 +627,46 @@ def test_do_get_returns_500_json_on_unexpected_exception(capsys):
     assert "error" in body
     assert "boom" in body["error"]
     assert "ERROR" in capsys.readouterr().out   # logged, not swallowed
+
+
+# ==================== Final-review fix wave: allowlist + HEAD guard ====================
+
+@pytest.mark.parametrize("path,expected", [
+    ("/stock_analyzer.html", True),
+    ("/sp500_simulator.html", True),
+    ("/README.md", True),
+    ("/sp500_top50_rankings.csv", True),
+    ("/top50_ticker_data/AAPL_monthly_10yr.csv", True),   # nested path
+    ("/.env", False),
+    ("/firebase-service-account.json", False),   # blocked by extension, not name
+    ("/.git/config", False),
+    ("/analyze_server.py", False),               # source code: not allowlisted
+    ("/requirements.txt", True),
+    ("/", False),                                 # no directory listing
+    ("/top50_ticker_data/", False),
+    ("/%2eenv", False),                           # percent-encoded dot bypass
+])
+def test_is_servable_static_path(path, expected):
+    assert analyze_server.Handler._is_servable_static_path(path) is expected
+
+
+def test_do_head_blocks_env_the_same_as_do_get():
+    """Regression test: a prior fix guarded do_GET but not do_HEAD, so
+    `HEAD /.env` still returned 200 with real file size/timestamp —
+    leaking the credential file's existence even though its contents
+    were never returned."""
+    import io
+
+    handler = analyze_server.Handler.__new__(analyze_server.Handler)
+    handler.path = "/.env"
+    handler.client_address = ("127.0.0.1", 0)
+    handler.wfile = io.BytesIO()
+    error_holder = {}
+
+    def fake_send_error(code, message=None):
+        error_holder["code"] = code
+    handler.send_error = fake_send_error
+
+    handler.do_HEAD()
+
+    assert error_holder["code"] == 404
