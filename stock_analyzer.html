@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Equity Dossier — Stock Analyzer</title>
+<style>
+  :root {
+    --paper: #f7f3e8; --paper-dark: #efe9d8; --ink: #1c1b16;
+    --ink-soft: #55524a; --rule: #8b8674; --accent: #7a1f1f;
+    --good: #2e6b30; --bad: #9c2b2b; --neutral: #8a7b3a;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--paper); color: var(--ink); margin: 0;
+         font-family: Georgia, "Times New Roman", serif; }
+  .sheet { max-width: 1060px; margin: 0 auto; padding: 24px 28px 60px; }
+  .mono { font-family: "Courier New", Courier, monospace; }
+  h1 { font-size: 44px; letter-spacing: 2px; text-align: center;
+       margin: 8px 0 2px; text-transform: uppercase; }
+  .dateline { text-align: center; color: var(--ink-soft); font-style: italic;
+              border-top: 1px solid var(--rule); border-bottom: 3px double var(--rule);
+              padding: 6px 0; margin-bottom: 18px; }
+  h2 { font-size: 15px; letter-spacing: 3px; text-transform: uppercase;
+       border-bottom: 3px double var(--rule); padding-bottom: 4px;
+       margin: 34px 0 12px; }
+  h2 .asof { float: right; font-size: 11px; letter-spacing: 1px;
+             color: var(--ink-soft); font-family: Courier, monospace; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; font-size: 11px; letter-spacing: 1px;
+       text-transform: uppercase; color: var(--ink-soft);
+       border-bottom: 1px solid var(--rule); padding: 4px 8px; }
+  td { padding: 5px 8px; border-bottom: 1px dotted var(--rule); }
+  td.num, th.num { text-align: right; font-family: Courier, monospace; }
+  .status { font-family: Courier, monospace; font-size: 13px;
+            color: var(--ink-soft); margin: 10px 0; min-height: 18px; }
+  .status.error { color: var(--bad); }
+  .controls { display: flex; gap: 10px; justify-content: center;
+              margin: 14px 0 6px; }
+  input[type=text] { font-family: Courier, monospace; font-size: 18px;
+      text-transform: uppercase; width: 180px; padding: 8px 10px;
+      border: 1px solid var(--rule); background: #fffdf5; }
+  button { font-family: Georgia, serif; font-size: 14px; letter-spacing: 1px;
+      text-transform: uppercase; padding: 8px 18px; cursor: pointer;
+      background: var(--ink); color: var(--paper); border: none; }
+  button.ghost { background: none; color: var(--ink);
+      border: 1px solid var(--rule); }
+  button:disabled { opacity: .45; cursor: default; }
+  .stamp { display: inline-block; border: 3px solid var(--accent);
+      color: var(--accent); padding: 4px 14px; font-size: 20px;
+      letter-spacing: 3px; text-transform: uppercase; font-weight: bold;
+      transform: rotate(-6deg); }
+  .badge { font-family: Courier, monospace; font-size: 12px;
+      border: 1px solid var(--rule); padding: 3px 8px;
+      background: var(--paper-dark); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .snapshot { display: flex; flex-wrap: wrap; gap: 8px 26px;
+      align-items: baseline; background: var(--paper-dark);
+      border: 1px solid var(--rule); padding: 12px 16px; }
+  .snapshot .co { font-size: 24px; font-weight: bold; }
+  .snapshot .kv { font-family: Courier, monospace; font-size: 13px; }
+  .kv b { font-size: 16px; }
+  .up { color: var(--good); } .down { color: var(--bad); }
+  .verdict-card { display: flex; gap: 22px; align-items: center;
+      border: 1px solid var(--rule); padding: 16px 20px;
+      background: #fffdf5; }
+  .grade { font-size: 64px; font-weight: bold; border: 4px solid var(--ink);
+      padding: 4px 22px; }
+  .grade.A, .grade.B { color: var(--good); border-color: var(--good); }
+  .grade.C, .grade.NA { color: var(--neutral); border-color: var(--neutral); }
+  .grade.D, .grade.F { color: var(--bad); border-color: var(--bad); }
+  .check-pass::before { content: "✓ "; color: var(--good); }
+  .check-fail::before { content: "✗ "; color: var(--bad); }
+  .check-neutral::before { content: "– "; color: var(--neutral); }
+  canvas { width: 100%; border: 1px solid var(--rule); background: #fffdf5; }
+  .sent { font-family: Courier, monospace; font-size: 11px; padding: 2px 6px;
+      border: 1px solid var(--rule); white-space: nowrap; }
+  .sent.pos { color: var(--good); } .sent.neg { color: var(--bad); }
+  .topics { color: var(--ink-soft); font-size: 12px; font-style: italic; }
+  .macro-ribbon { display: flex; gap: 30px; flex-wrap: wrap;
+      font-family: Courier, monospace; font-size: 14px;
+      border: 3px double var(--rule); padding: 10px 16px; }
+  .foot { color: var(--ink-soft); font-size: 12px; border-top: 3px double
+      var(--rule); margin-top: 40px; padding-top: 10px; }
+  .unavailable { color: var(--ink-soft); font-style: italic;
+      font-family: Courier, monospace; font-size: 13px; }
+  .archive-row { cursor: pointer; }
+  .archive-row:hover { background: var(--paper-dark); }
+  a.datelink { color: var(--accent); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="sheet">
+  <header>
+    <h1>The Equity Dossier</h1>
+    <div class="dateline">Value · Analysts · News &amp; Trends · Technicals ·
+      Macro — <span class="mono" id="todayline"></span></div>
+    <div class="controls">
+      <input type="text" id="ticker-input" placeholder="AAPL"
+             autocomplete="off" spellcheck="false">
+      <button id="analyze-btn">Analyze</button>
+    </div>
+    <div class="status" id="status"></div>
+  </header>
+
+  <section id="archive-section">
+    <h2>The Archive
+      <button class="ghost" id="archive-toggle"
+              style="float:right;font-size:11px;padding:2px 10px">hide</button>
+    </h2>
+    <div id="archive-body">
+      <table>
+        <thead><tr><th>Ticker</th><th>Company</th><th>Grade</th>
+          <th>Updated</th></tr></thead>
+        <tbody id="archive-rows"></tbody>
+      </table>
+      <div class="unavailable hidden" id="archive-empty">
+        No tickers analyzed yet — be the first: enter one above.</div>
+    </div>
+  </section>
+
+  <main id="report" class="hidden">
+    <section id="snapshot-section">
+      <div class="snapshot" id="snapshot-bar"></div>
+      <div style="display:flex;justify-content:space-between;
+                  align-items:center;margin-top:8px">
+        <span class="badge" id="asof-badge"></span>
+        <span class="stamp hidden" id="historical-stamp"></span>
+        <button class="ghost" id="refresh-btn"
+          title="Re-fetches today's data. Costs API quota: up to ~10 FMP and 5 Alpha Vantage calls.">
+          Refresh ↻</button>
+      </div>
+    </section>
+
+    <section><h2>The Verdict</h2><div id="verdict-body"></div></section>
+
+    <section><h2>Past Editions</h2>
+      <canvas id="history-chart" height="160"></canvas>
+      <div id="history-body"></div>
+    </section>
+
+    <section><h2>Value Analysis</h2><div id="value-body"></div>
+      <canvas id="quarters-chart" height="180" style="margin-top:14px">
+      </canvas></section>
+
+    <section><h2>Analyst Desk</h2><div id="analyst-body"></div></section>
+
+    <section><h2>Technicals</h2>
+      <canvas id="price-chart" height="220"></canvas>
+      <div id="technicals-body"></div></section>
+
+    <section><h2>News &amp; Trends</h2><div id="news-body"></div></section>
+
+    <section><h2>Macro Context
+        <span class="asof" id="macro-asof"></span></h2>
+      <div class="macro-ribbon" id="macro-body"></div></section>
+
+    <div class="foot" id="footnotes"></div>
+  </main>
+</div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtNum = (v, d = 2) => v == null ? "—" :
+  Number(v).toLocaleString("en-US", {maximumFractionDigits: d});
+const fmtPct = (v, d = 1) => v == null ? "—" : fmtNum(v, d) + "%";
+const fmtFrac = v => v == null ? "—" : fmtNum(v * 100, 1) + "%";
+const fmtMoney = v => {
+  if (v == null) return "—";
+  const abs = Math.abs(v);
+  if (abs >= 1e12) return fmtNum(v / 1e12) + "T";
+  if (abs >= 1e9) return fmtNum(v / 1e9) + "B";
+  if (abs >= 1e6) return fmtNum(v / 1e6) + "M";
+  return fmtNum(v);
+};
+const timeAgo = iso => {
+  if (!iso) return "—";
+  const hours = (Date.now() - new Date(iso).getTime()) / 36e5;
+  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))} min ago`;
+  if (hours < 48) return `${Math.round(hours)} hours ago`;
+  return `${Math.round(hours / 24)} days ago`;
+};
+const setStatus = (text, isError) => {
+  const el = $("status");
+  el.textContent = text || "";
+  el.classList.toggle("error", !!isError);
+};
+
+let currentTicker = null;
+
+async function api(path) {
+  if (location.protocol === "file:") {
+    throw new Error("This page must be served over HTTP. Run: " +
+      "python3 analyze_server.py, then open http://localhost:8000/stock_analyzer.html");
+  }
+  let response;
+  try { response = await fetch(path); }
+  catch { throw new Error("Cannot reach the API — is analyze_server.py running?"); }
+  let payload;
+  try {
+    payload = await response.json();
+  } catch (parseError) {
+    // A malformed body (e.g. a stray NaN token) must surface as an error,
+    // not silently become {} and render as an empty, unexplained report.
+    throw new Error(`Server returned invalid JSON (HTTP ${response.status}): ` +
+      parseError.message);
+  }
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload;
+}
+
+/* ---------- canvas helpers ---------- */
+function prepCanvas(canvas) {
+  const width = canvas.clientWidth, height = canvas.getAttribute("height");
+  canvas.width = width * devicePixelRatio;
+  canvas.height = height * devicePixelRatio;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+  ctx.clearRect(0, 0, width, height);
+  return [ctx, width, Number(height)];
+}
+
+// seriesList: [{points: [{x: 0..n, y: value}], color, label, dash?}]
+function drawLines(canvas, seriesList, formatY = v => fmtNum(v)) {
+  const [ctx, W, H] = prepCanvas(canvas);
+  const pad = {l: 54, r: 10, t: 10, b: 20};
+  const all = seriesList.flatMap(s => s.points.map(p => p.y))
+    .filter(v => v != null);
+  if (!all.length) return;
+  const maxX = Math.max(...seriesList.map(s => s.points.length - 1), 1);
+  let lo = Math.min(...all), hi = Math.max(...all);
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const X = i => pad.l + (W - pad.l - pad.r) * i / maxX;
+  const Y = v => pad.t + (H - pad.t - pad.b) * (1 - (v - lo) / (hi - lo));
+  ctx.font = "10px Courier"; ctx.fillStyle = "#55524a";
+  ctx.strokeStyle = "#d8d2bd";
+  for (let g = 0; g <= 3; g++) {
+    const v = lo + (hi - lo) * g / 3, y = Y(v);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y);
+    ctx.stroke();
+    ctx.fillText(formatY(v), 4, y + 3);
+  }
+  let lx = pad.l;
+  for (const s of seriesList) {
+    ctx.strokeStyle = s.color; ctx.setLineDash(s.dash || []);
+    ctx.beginPath();
+    let started = false;
+    s.points.forEach((p, i) => {
+      if (p.y == null) return;
+      const x = X(p.x ?? i), y = Y(p.y);
+      started ? ctx.lineTo(x, y) : ctx.moveTo(x, y); started = true;
+    });
+    ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = s.color;
+    ctx.fillText(s.label, lx, H - 6); lx += ctx.measureText(s.label).width + 16;
+  }
+}
+
+function drawQuarterBars(canvas, quarters) {
+  const [ctx, W, H] = prepCanvas(canvas);
+  const n = quarters.length;
+  if (!n) return;
+  const groupWidth = (W - 60) / n;
+  const maxRev = Math.max(...quarters.map(q => q.revenue || 0), 1);
+  const maxEps = Math.max(...quarters.map(q => Math.abs(q.eps || 0)), 0.01);
+  ctx.font = "10px Courier";
+  quarters.slice().reverse().forEach((q, i) => {
+    const x0 = 30 + i * groupWidth;
+    const revH = (H - 50) * (q.revenue || 0) / maxRev;
+    const epsH = (H - 50) * Math.abs(q.eps || 0) / maxEps;
+    ctx.fillStyle = "#1c1b16";
+    ctx.fillRect(x0, H - 30 - revH, groupWidth * .32, revH);
+    ctx.fillStyle = (q.eps || 0) < 0 ? "#9c2b2b" : "#7a1f1f";
+    ctx.fillRect(x0 + groupWidth * .38, H - 30 - epsH, groupWidth * .32, epsH);
+    ctx.fillStyle = "#55524a";
+    ctx.fillText(q.date || "", x0, H - 16);
+    ctx.fillText("rev " + fmtMoney(q.revenue), x0, 12);
+    ctx.fillText("eps " + fmtNum(q.eps), x0, 24);
+  });
+  ctx.fillStyle = "#55524a";
+  ctx.fillText("■ revenue (black)  ■ diluted EPS (red) — scales independent",
+               30, H - 4);
+}
+
+/* ---------- archive ---------- */
+async function loadArchive() {
+  try {
+    const {tickers} = await api("/api/analyzed");
+    $("archive-empty").classList.toggle("hidden", tickers.length > 0);
+    $("archive-rows").innerHTML = tickers.map(t => `
+      <tr class="archive-row" data-ticker="${esc(t.ticker)}">
+        <td class="mono"><b>${esc(t.ticker)}</b></td><td>${esc(t.name)}</td>
+        <td class="mono">${esc(t.latestGrade ?? "—")}</td>
+        <td class="mono" title="${esc(t.updatedAt)}">${timeAgo(t.updatedAt)}</td>
+      </tr>`).join("");
+    document.querySelectorAll(".archive-row").forEach(row =>
+      row.addEventListener("click", () => analyze(row.dataset.ticker, {})));
+  } catch (error) { setStatus(error.message, true); }
+}
+
+/* ---------- main flow ---------- */
+async function analyze(ticker, {date, refresh} = {}) {
+  ticker = ticker.trim().toUpperCase().replace(".", "-");
+  if (!ticker) return;
+  setStatus(date ? `Opening ${ticker} edition of ${date}…`
+                 : `Analyzing ${ticker}… (first fetch of the day takes ~15s)`);
+  $("analyze-btn").disabled = true;
+  try {
+    const params = new URLSearchParams({ticker});
+    if (date) params.set("date", date);
+    if (refresh) params.set("refresh", "1");
+    const bundle = await api("/api/analyze?" + params);
+    currentTicker = ticker;
+    history.replaceState(null, "",
+      "?" + new URLSearchParams(date ? {ticker, date} : {ticker}));
+    render(bundle, !!date);
+    setStatus("");
+  } catch (error) { setStatus(error.message, true); }
+  finally { $("analyze-btn").disabled = false; }
+}
+
+function unavailableNote(target, sections, key) {
+  target.innerHTML = `<div class="unavailable">Section unavailable ` +
+    `(${esc(sections?.[key] ?? "source error / quota exhausted")}).</div>`;
+}
+
+function unavailableSection(target, canvas, sections, key) {
+  unavailableNote(target, sections, key);
+  if (canvas) prepCanvas(canvas);
+}
+
+function render(bundle, isHistorical) {
+  $("report").classList.remove("hidden");
+  const sections = bundle.meta?.sections || {};
+  renderSnapshot(bundle, isHistorical);
+  renderVerdict(bundle.verdict);
+  renderHistory(bundle.ticker, isHistorical ? bundle.date : null);
+  renderValue(bundle, sections);
+  renderAnalyst(bundle.analyst, sections);
+  renderTechnicals(bundle.technicals, sections);
+  renderNews(bundle.news, sections);
+  renderMacro(bundle.macro, sections);
+  renderFootnotes(bundle);
+  $("report").scrollIntoView({behavior: "smooth"});
+}
+
+function renderSnapshot(bundle, isHistorical) {
+  const s = bundle.snapshot || {};
+  const change = s.dayChangePct;
+  $("snapshot-bar").innerHTML = `
+    <span class="co">${esc(s.name ?? bundle.ticker)}</span>
+    <span class="kv">${esc(s.sector ?? "")}${s.industry ? " · " +
+      esc(s.industry) : ""}</span>
+    <span class="kv">price <b>$${fmtNum(s.price)}</b>
+      <span class="${change == null ? "" : (change >= 0 ? "up" : "down")}">${change == null ? "" :
+      (change >= 0 ? "▲" : "▼") + fmtNum(Math.abs(change)) + "%"}</span></span>
+    <span class="kv">mkt cap <b>${fmtMoney(s.marketCap)}</b></span>
+    <span class="kv">P/E <b>${fmtNum(s.peRatio)}</b></span>
+    <span class="kv">52w <b>${fmtNum(s.week52Low)}–${fmtNum(s.week52High)}</b></span>`;
+  $("asof-badge").textContent =
+    `Data as of ${new Date(bundle.meta?.fetchedAt).toLocaleString()}`;
+  $("asof-badge").classList.toggle("hidden", isHistorical);
+  $("refresh-btn").classList.toggle("hidden", isHistorical);
+  const stamp = $("historical-stamp");
+  stamp.classList.toggle("hidden", !isHistorical);
+  if (isHistorical) stamp.textContent = `Historical edition — ${bundle.date}`;
+}
+
+function renderVerdict(verdict) {
+  if (!verdict) return unavailableNote($("verdict-body"), null, null);
+  // The displayed grade ("N/A") isn't always a valid bare CSS class token
+  // (a literal "/" can't be targeted by a plain class selector) — the
+  // class gets the letters only, the visible text keeps the real value.
+  const gradeClass = (verdict.grade || "").replace(/[^A-Za-z]/g, "");
+  $("verdict-body").innerHTML = `
+    <div class="verdict-card">
+      <span class="grade ${esc(gradeClass)}">${esc(verdict.grade)}</span>
+      <div><p style="margin:0 0 6px">${esc(verdict.summary)}</p>
+      <span class="mono" style="font-size:12px">${verdict.passes} of
+        ${verdict.evaluated} evaluated checks pass</span></div>
+    </div>`;
+}
+
+async function renderHistory(ticker, activeDate) {
+  const body = $("history-body");
+  try {
+    const {summaries} = await api("/api/history?ticker=" + ticker);
+    const dates = Object.keys(summaries).sort();
+    if (dates.length < 1) { body.innerHTML = ""; return; }
+    drawLines($("history-chart"), [
+      {label: "pass ratio", color: "#1c1b16",
+       points: dates.map((d, i) => ({x: i, y: summaries[d].passRatio}))},
+      {label: "news sentiment", color: "#7a1f1f", dash: [4, 3],
+       points: dates.map((d, i) => ({x: i, y: summaries[d].sentimentScore}))},
+    ], v => fmtNum(v, 2));
+    body.innerHTML = `<table><thead><tr><th>Date</th><th>Grade</th>
+      <th class="num">Price</th><th class="num">Target</th>
+      <th class="num">Sentiment</th></tr></thead><tbody>` +
+      dates.slice().reverse().map(d => {
+        const s = summaries[d];
+        const link = d === activeDate ? `<b>${d}</b>` :
+          `<a class="datelink" href="#" data-date="${d}">${d}</a>`;
+        return `<tr><td class="mono">${link}</td>
+          <td class="mono">${esc(s.grade ?? "—")}</td>
+          <td class="num">$${fmtNum(s.price)}</td>
+          <td class="num">$${fmtNum(s.targetMean)}</td>
+          <td class="num">${fmtNum(s.sentimentScore, 2)}</td></tr>`;
+      }).join("") + "</tbody></table>";
+    body.querySelectorAll("a.datelink").forEach(a =>
+      a.addEventListener("click", e => {
+        e.preventDefault(); analyze(ticker, {date: a.dataset.date});
+      }));
+  } catch { body.innerHTML =
+    `<div class="unavailable">No history available.</div>`; }
+}
+
+function renderValue(bundle, sections) {
+  const body = $("value-body");
+  const checks = bundle.verdict?.checks;
+  const ratios = bundle.fundamentals?.ratios || {};
+  if (!checks) return unavailableSection(body, $("quarters-chart"),
+                                        sections, "fundamentals");
+  const row = c => `<tr><td class="check-${c.result}">${esc(c.label)}</td>
+    <td class="num">${fmtNum(c.value, 3)}</td>
+    <td class="mono" style="font-size:11px">${esc(c.threshold)}</td></tr>`;
+  const half = Math.ceil(checks.length / 2);
+  const tableOf = list => `<table><thead><tr><th>Check</th>
+    <th class="num">Value</th><th>Threshold</th></tr></thead><tbody>` +
+    list.map(row).join("") + "</tbody></table>";
+  body.innerHTML = `<div class="grid2">${tableOf(checks.slice(0, half))}
+    ${tableOf(checks.slice(half))}</div>
+    <p class="mono" style="font-size:12px;color:var(--ink-soft)">
+    P/B ${fmtNum(ratios.priceToBook)} · EV/EBITDA ${fmtNum(ratios.evToEBITDA)}
+    · net margin ${fmtFrac(ratios.netMargin)} · source:
+    ${esc(sections.fundamentals ?? "—")}</p>`;
+  drawQuarterBars($("quarters-chart"), bundle.fundamentals?.quarters || []);
+}
+
+function renderAnalyst(analyst, sections) {
+  const body = $("analyst-body");
+  if (!analyst) return unavailableNote(body, sections, "analyst");
+  const r = analyst.ratings || {};
+  const total = ["strongBuy","buy","hold","sell","strongSell"]
+    .reduce((sum, k) => sum + (r[k] || 0), 0) || 1;
+  const seg = (k, color, label) => (r[k] || 0) === 0 ? "" :
+    `<span style="display:inline-block;background:${color};color:#f7f3e8;
+     padding:3px 0;text-align:center;font-size:11px;
+     width:${(r[k] / total * 100).toFixed(1)}%">${label} ${r[k]}</span>`;
+  const t = analyst.targets || {};
+  const gauge = () => {
+    if (t.low == null || t.high == null || t.high <= t.low) return "—";
+    const pos = v => Math.min(99, Math.max(1,
+      (v - t.low) / (t.high - t.low) * 100)).toFixed(1);
+    const mark = (v, glyph, cls) => v == null ? "" :
+      `<span style="position:absolute;left:${pos(v)}%" class="${cls}"
+        title="$${fmtNum(v)}">${glyph}</span>`;
+    // Color the current-price marker by where it actually sits relative
+    // to the analyst consensus, not a fixed "down" (bearish) regardless
+    // of whether the price is above or below the target.
+    const currentCls = (t.current == null || t.mean == null) ? "" :
+      (t.current >= t.mean ? "up" : "down");
+    return `<div class="mono" style="position:relative;height:22px;
+      border-bottom:1px solid var(--rule);margin:6px 0">
+      ${mark(t.mean, "▼", "")}${mark(t.current, "●", currentCls)}</div>
+      <div class="mono" style="display:flex;justify-content:space-between;
+      font-size:12px"><span>low $${fmtNum(t.low)}</span>
+      <span>consensus $${fmtNum(t.mean)} · current $${fmtNum(t.current)}</span>
+      <span>high $${fmtNum(t.high)}</span></div>`;
+  };
+  const changes = (analyst.upgradesDowngrades || []).map(u => `
+    <tr><td class="mono">${esc(u.date)}</td><td>${esc(u.firm)}</td>
+    <td>${esc(u.fromGrade ?? "—")} → <b>${esc(u.toGrade ?? "—")}</b></td>
+    <td class="mono">${esc(u.action ?? "")}</td></tr>`).join("");
+  body.innerHTML = `
+    <div style="font-size:0;border:1px solid var(--rule)">
+      ${seg("strongBuy", "#2e6b30", "SB")}${seg("buy", "#5c8a4e", "B")}
+      ${seg("hold", "#8a7b3a", "H")}${seg("sell", "#a5552e", "S")}
+      ${seg("strongSell", "#9c2b2b", "SS")}</div>
+    ${gauge()}
+    ${changes ? `<table style="margin-top:10px"><thead><tr><th>Date</th>
+      <th>Firm</th><th>Change</th><th>Action</th></tr></thead>
+      <tbody>${changes}</tbody></table>` : ""}
+    <p class="mono" style="font-size:11px;color:var(--ink-soft)">source:
+      ${esc(sections.analyst ?? "—")}</p>`;
+}
+
+function renderTechnicals(technicals, sections) {
+  const body = $("technicals-body");
+  if (!technicals) return unavailableSection(body, $("price-chart"),
+                                            sections, "technicals");
+  const priceDates = (technicals.prices || []).map(p => p.date);
+  const align = series => {
+    const byDate = Object.fromEntries((series || [])
+      .map(p => [p.date, p.value]));
+    return priceDates.map((d, i) => ({x: i, y: byDate[d] ?? null}));
+  };
+  drawLines($("price-chart"), [
+    {label: "close", color: "#1c1b16",
+     points: (technicals.prices || []).map((p, i) => ({x: i, y: p.close}))},
+    {label: "SMA-50", color: "#7a1f1f", points: align(technicals.sma50)},
+    {label: "SMA-200", color: "#8a7b3a", dash: [5, 4],
+     points: align(technicals.sma200)},
+  ], v => "$" + fmtNum(v, 0));
+  const rsi = technicals.rsi || {}, macd = technicals.macd || {};
+  // Alpha Vantage's free tier can lag yfinance's freshest close by a day
+  // or more — show it instead of implying the indicators are as current
+  // as the price chart above them.
+  const staleness = technicals.stale
+    ? ` · <span class="unavailable">indicators as of
+        ${esc(technicals.indicatorsAsOf)}, price chart is newer</span>`
+    : "";
+  body.innerHTML = `<p class="mono" style="font-size:14px">
+    RSI-14 <b>${fmtNum(rsi.value, 1)}</b> — ${esc(rsi.state ?? "—")} ·
+    MACD(12/26/9) <b>${fmtNum(macd.macd, 3)}</b> vs signal
+    ${fmtNum(macd.signal, 3)} — ${esc(macd.state ?? "—")} ·
+    source: ${esc(sections.technicals ?? "—")}${staleness}</p>`;
+}
+
+function renderNews(news, sections) {
+  const body = $("news-body");
+  if (!news) return unavailableNote(body, sections, "news");
+  const badge = (score, label) => `<span class="sent ${score > 0.15 ? "pos" :
+    score < -0.15 ? "neg" : ""}">${esc(label)} ${fmtNum(score, 2)}</span>`;
+  const isSafeUrl = url => /^https?:\/\//i.test(String(url ?? ""));
+  const rows = (news.articles || []).map(a => `
+    <tr><td>${isSafeUrl(a.url) ?
+        `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.title)}</a>` :
+        esc(a.title)}<div class="topics">${esc((a.topics || [])
+      .join(" · "))}</div></td>
+    <td class="mono" style="font-size:12px">${esc(a.source)}<br>
+      ${esc((a.publishedAt || "").replace("T", " "))}</td>
+    <td>${badge(a.sentimentScore, a.sentimentLabel)}</td></tr>`).join("");
+  body.innerHTML = `<p>Aggregate sentiment (bearish ↔ bullish):
+    ${badge(news.aggregateScore, news.aggregateLabel)}</p>
+    <table><thead><tr><th>Story</th><th>Source / Time</th>
+    <th>Sentiment</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderMacro(macro, sections) {
+  const body = $("macro-body");
+  if (!macro) {
+    unavailableNote(body, sections, "macro");
+    $("macro-asof").textContent = "";
+    return;
+  }
+  body.innerHTML = `
+    <span>10Y Treasury <b>${fmtPct(macro.treasury10y)}</b></span>
+    <span>Fed funds <b>${fmtPct(macro.fedFunds)}</b></span>
+    <span>CPI YoY <b>${fmtPct(macro.cpiYoY)}</b></span>
+    <span>Unemployment <b>${fmtPct(macro.unemployment)}</b></span>`;
+  $("macro-asof").textContent = macro.fetchedAt ?
+    "as of " + new Date(macro.fetchedAt).toLocaleString() : "";
+}
+
+function renderFootnotes(bundle) {
+  const meta = bundle.meta || {};
+  $("footnotes").innerHTML = `Sources: Financial Modeling Prep, Yahoo Finance
+    (yfinance), Alpha Vantage. Store: <b>${esc(meta.store ?? "—")}</b>
+    (${meta.fromStore ? "served from store" : "freshly fetched"}).
+    Bundle fetched ${esc(meta.fetchedAt ?? "—")}; macro fetched
+    ${esc(bundle.macro?.fetchedAt ?? "—")}. API calls this fetch:
+    ${meta.avCallsUsed ?? "—"} Alpha Vantage / ${meta.fmpCallsUsed ?? "—"}
+    FMP. Per-section sources: <span class="mono">${esc(JSON.stringify(
+    meta.sections || {}))}</span>. Not investment advice.`;
+}
+
+/* ---------- wiring ---------- */
+$("analyze-btn").addEventListener("click",
+  () => analyze($("ticker-input").value, {}));
+$("ticker-input").addEventListener("keydown",
+  e => { if (e.key === "Enter" && !$("analyze-btn").disabled)
+    analyze($("ticker-input").value, {}); });
+$("refresh-btn").addEventListener("click", () => {
+  if (currentTicker && confirm("Refresh re-fetches today's data and spends " +
+      "API quota (~10 FMP + up to 5 Alpha Vantage calls). Continue?"))
+    analyze(currentTicker, {refresh: true});
+});
+$("archive-toggle").addEventListener("click", () => {
+  const hidden = $("archive-body").classList.toggle("hidden");
+  $("archive-toggle").textContent = hidden ? "show" : "hide";
+});
+$("todayline").textContent = new Date().toDateString();
+if (location.protocol === "file:") {
+  setStatus("Serve over HTTP: python3 analyze_server.py, then open " +
+            "http://localhost:8000/stock_analyzer.html", true);
+} else {
+  loadArchive();
+  const params = new URLSearchParams(location.search);
+  if (params.get("ticker"))
+    analyze(params.get("ticker"), {date: params.get("date") || undefined});
+}
+</script>
+</body>
+</html>
