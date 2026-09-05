@@ -340,6 +340,19 @@ function unavailableNote(target, sections, key) {
     `(${esc(sections?.[key] ?? "source error / quota exhausted")}).</div>`;
 }
 
+// Mirrors analysis_sources.is_non_equity: a positively non-equity quoteType
+// ("ETF", "MUTUALFUND", "INDEX") is a fund; a missing one is not.
+function isFund(quoteType) {
+  return !!quoteType && quoteType !== "EQUITY";
+}
+
+function fundNotGradedNote(target) {
+  target.innerHTML = `<div class="unavailable">Not graded — this is a fund,
+    not a company. The value grade scores company fundamentals (revenue
+    growth, margins, ROE, leverage, free cash flow), none of which a fund
+    reports. Technicals and news below still apply.</div>`;
+}
+
 function unavailableSection(target, canvas, sections, key) {
   unavailableNote(target, sections, key);
   if (canvas) prepCanvas(canvas);
@@ -349,7 +362,7 @@ function render(bundle, isHistorical) {
   $("report").classList.remove("hidden");
   const sections = bundle.meta?.sections || {};
   renderSnapshot(bundle, isHistorical);
-  renderVerdict(bundle.verdict);
+  renderVerdict(bundle.verdict, bundle.snapshot?.quoteType);
   renderHistory(bundle.ticker, isHistorical ? bundle.date : null);
   renderValue(bundle, sections);
   renderAnalyst(bundle.analyst, sections);
@@ -365,8 +378,8 @@ function renderSnapshot(bundle, isHistorical) {
   const change = s.dayChangePct;
   $("snapshot-bar").innerHTML = `
     <span class="co">${esc(s.name ?? bundle.ticker)}</span>
-    <span class="kv">${esc(s.sector ?? "")}${s.industry ? " · " +
-      esc(s.industry) : ""}</span>
+    <span class="kv">${isFund(s.quoteType) ? esc(s.quoteType) :
+      esc(s.sector ?? "") + (s.industry ? " · " + esc(s.industry) : "")}</span>
     <span class="kv">price <b>$${fmtNum(s.price)}</b>
       <span class="${change == null ? "" : (change >= 0 ? "up" : "down")}">${change == null ? "" :
       (change >= 0 ? "▲" : "▼") + fmtNum(Math.abs(change)) + "%"}</span></span>
@@ -382,8 +395,12 @@ function renderSnapshot(bundle, isHistorical) {
   if (isHistorical) stamp.textContent = `Historical edition — ${bundle.date}`;
 }
 
-function renderVerdict(verdict) {
-  if (!verdict) return unavailableNote($("verdict-body"), null, null);
+function renderVerdict(verdict, quoteType) {
+  // A fund is deliberately ungraded, so the empty verdict is the intended
+  // outcome here, not a fetch failure — don't report it as one.
+  if (!verdict) return isFund(quoteType)
+    ? fundNotGradedNote($("verdict-body"))
+    : unavailableNote($("verdict-body"), null, null);
   // The displayed grade ("N/A") isn't always a valid bare CSS class token
   // (a literal "/" can't be targeted by a plain class selector) — the
   // class gets the letters only, the visible text keeps the real value.
@@ -434,8 +451,15 @@ function renderValue(bundle, sections) {
   const body = $("value-body");
   const checks = bundle.verdict?.checks;
   const ratios = bundle.fundamentals?.ratios || {};
-  if (!checks) return unavailableSection(body, $("quarters-chart"),
-                                        sections, "fundamentals");
+  if (!checks) {
+    if (isFund(bundle.snapshot?.quoteType)) {
+      fundNotGradedNote(body);
+      prepCanvas($("quarters-chart"));
+      return;
+    }
+    return unavailableSection(body, $("quarters-chart"),
+                              sections, "fundamentals");
+  }
   const row = c => `<tr><td class="check-${c.result}">${esc(c.label)}</td>
     <td class="num">${fmtNum(c.value, 3)}</td>
     <td class="mono" style="font-size:11px">${esc(c.threshold)}</td></tr>`;

@@ -234,6 +234,19 @@ tickers are served from Firestore at no API cost. Without Firestore
 credentials the server still runs with an in-memory store (nothing persists;
 the page footnote shows the store status).
 
+**When a ticker is not graded.** The value grade is the share of its ten
+fundamental checks that pass, counting only the checks that had data — so a
+thin denominator makes the letter an artifact of a single number rather than a
+judgement. QQQ, an ETF with nine checks neutral, rode entirely on trailing P/E
+and swung F → A in six days when that P/E was revised 30.63 → 29.30, crossing
+the "< 30" line. Two guards prevent that. Fewer than five checks with data
+returns **N/A**, names the shortfall, and records no pass ratio for the history
+chart. And a fund — any Yahoo `quoteType` other than `EQUITY`, the same test
+behind the screener's gate — is not graded at all: it reports no revenue,
+margins, ROE, or leverage to grade, so its fundamentals are never fetched and
+it keeps no sector (FMP files QQQ under "Financial Services", which describes
+the trust, not what it holds). Technicals, news, and macro still apply.
+
 Not investment advice.
 
 ## Screening Desk

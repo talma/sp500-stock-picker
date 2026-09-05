@@ -100,10 +100,18 @@ class BundleFetcher:
         av_before, fmp_before = self.av.calls_used, self.fmp.calls_used
         sections = {}
         snapshot = self.src.yf_quote(ticker)      # LookupError propagates
+        is_fund = self.src.is_non_equity(snapshot.get("quoteType"))
 
         try:
             profile = self.src.parse_profile(
                 self.fmp.get("profile", symbol=ticker))
+            # A fund has no sector or industry of its own — FMP files QQQ under
+            # "Financial Services", which describes the trust, not what it
+            # holds. yfinance already leaves both None for a fund; don't let
+            # the profile overlay put a misleading label back.
+            if is_fund:
+                profile = {k: v for k, v in profile.items()
+                           if k not in ("sector", "industry")}
             snapshot.update({k: v for k, v in profile.items() if v})
             sections["profile"] = "fmp"
         except Exception as error:
@@ -111,26 +119,35 @@ class BundleFetcher:
                              "using yfinance-only snapshot")
             sections["profile"] = "yfinance"
 
-        result = _with_fallback(
-            sections, "fundamentals", ticker,
-            lambda: self.src.build_fundamentals(
-                self.fmp.get("income-statement", symbol=ticker,
-                             period="quarter", limit=8),
-                self.fmp.get("balance-sheet-statement", symbol=ticker,
-                             period="quarter", limit=1),
-                self.fmp.get("cash-flow-statement", symbol=ticker,
-                             period="quarter", limit=4),
-                self.fmp.get("income-statement", symbol=ticker,
-                             period="annual", limit=1),
-                self.fmp.get("ratios-ttm", symbol=ticker),
-                self.fmp.get("key-metrics-ttm", symbol=ticker),
-                market_cap=snapshot.get("marketCap")),
-            "fmp",
-            lambda: self.src.yf_fundamentals(ticker),
-            "yfinance")
-        fundamentals, metrics = result if result is not None else (None, None)
-        verdict = self.grader.compute_verdict(metrics) \
-            if metrics is not None else None
+        if is_fund:
+            # The value grade scores company fundamentals — revenue growth,
+            # margins, ROE, leverage — and a fund reports none of them. Every
+            # check but P/E comes back neutral, collapsing the grade onto that
+            # single number (QQQ: F -> A in six days on one P/E revision).
+            # Don't grade funds at all; technicals and news still apply.
+            fundamentals, metrics, verdict = None, None, None
+            sections["fundamentals"] = "n/a (fund, not a company)"
+        else:
+            result = _with_fallback(
+                sections, "fundamentals", ticker,
+                lambda: self.src.build_fundamentals(
+                    self.fmp.get("income-statement", symbol=ticker,
+                                 period="quarter", limit=8),
+                    self.fmp.get("balance-sheet-statement", symbol=ticker,
+                                 period="quarter", limit=1),
+                    self.fmp.get("cash-flow-statement", symbol=ticker,
+                                 period="quarter", limit=4),
+                    self.fmp.get("income-statement", symbol=ticker,
+                                 period="annual", limit=1),
+                    self.fmp.get("ratios-ttm", symbol=ticker),
+                    self.fmp.get("key-metrics-ttm", symbol=ticker),
+                    market_cap=snapshot.get("marketCap")),
+                "fmp",
+                lambda: self.src.yf_fundamentals(ticker),
+                "yfinance")
+            fundamentals, metrics = result if result is not None else (None, None)
+            verdict = self.grader.compute_verdict(metrics) \
+                if metrics is not None else None
 
         analyst = _with_fallback(
             sections, "analyst", ticker,
@@ -210,9 +227,14 @@ class BundleFetcher:
 def _summary_of(bundle):
     verdict = bundle.get("verdict") or {}
     evaluated = verdict.get("evaluated") or 0
+    # An ungraded verdict ("N/A" — too few checks had data) has no meaningful
+    # pass ratio, and the history chart plots this value: passes/evaluated off
+    # a one- or two-check denominator is exactly the 0.0-or-1.0 artifact the
+    # grade floor exists to suppress, so leave it out rather than draw it.
+    graded = verdict.get("grade") not in (None, "N/A")
     return {"grade": verdict.get("grade"),
             "passRatio": (verdict.get("passes", 0) / evaluated)
-                if evaluated else None,
+                if graded and evaluated else None,
             "price": (bundle.get("snapshot") or {}).get("price"),
             "targetMean": ((bundle.get("analyst") or {}).get("targets")
                            or {}).get("mean"),

@@ -202,11 +202,23 @@ def test_parse_profile():
         "industry": "Consumer Electronics"}
 
 
+@pytest.mark.parametrize("quote_type,expected", [
+    ("EQUITY", False),
+    (None, False),        # missing type is tolerated, like a missing FMP key
+    ("ETF", True),
+    ("MUTUALFUND", True),
+    ("INDEX", True),
+])
+def test_is_non_equity(quote_type, expected):
+    assert src.is_non_equity(quote_type) is expected
+
+
 # ---------- yfinance fallbacks (stubbed Ticker) ----------
 
 class FakeTicker:
     def __init__(self, symbol):
-        self.info = {"longName": "Apple Inc.", "sector": "Technology",
+        self.info = {"longName": "Apple Inc.", "quoteType": "EQUITY",
+                     "sector": "Technology",
                      "industry": "Consumer Electronics",
                      "regularMarketPrice": 230.0,
                      "regularMarketPreviousClose": 225.0,
@@ -220,6 +232,19 @@ def test_yf_quote_maps_info_fields():
     assert quote["price"] == 230.0
     assert quote["dayChangePct"] == pytest.approx((230.0 / 225.0 - 1) * 100)
     assert quote["week52High"] == 260.0
+
+
+def test_yf_quote_carries_the_quote_type():
+    """The analyzer keys its skip-the-grade decision off this field, so it has
+    to survive into the snapshot rather than being dropped here."""
+    class FundTicker:
+        def __init__(self, symbol):
+            self.info = {"shortName": "Invesco QQQ Trust", "quoteType": "ETF",
+                         "regularMarketPrice": 718.96, "trailingPE": 29.3}
+
+    assert src.yf_quote("AAPL", ticker_factory=FakeTicker)["quoteType"] \
+        == "EQUITY"
+    assert src.yf_quote("QQQ", ticker_factory=FundTicker)["quoteType"] == "ETF"
 
 
 def test_yf_quote_unknown_ticker_raises_lookup_error():

@@ -422,12 +422,15 @@ def stub_src(**overrides):
         yf_prices=lambda t: close_stub(),
         yf_fundamentals=lambda t: ({"quarters": [], "annual": None,
                                     "ratios": {}},
-                                   {"roe": 0.30, "fcfTTM": 1.0}),
+                                   {"roe": 0.30, "fcfTTM": 1.0,
+                                    "revenueGrowth": 0.12, "currentRatio": 1.4,
+                                    "peTTM": 22.0}),
         yf_analyst=lambda t: {"ratings": {"strongBuy": 1, "buy": 1, "hold": 1,
                                           "sell": 0, "strongSell": 0},
                               "targets": {"low": 1, "mean": 2, "high": 3},
                               "upgradesDowngrades": []},
         parse_profile=analysis_sources.parse_profile,
+        is_non_equity=analysis_sources.is_non_equity,
         build_fundamentals=analysis_sources.build_fundamentals,
         parse_analyst=analysis_sources.parse_analyst,
         parse_news=analysis_sources.parse_news,
@@ -451,7 +454,9 @@ def test_bundle_fetcher_degrades_each_section_independently():
     assert bundle["news"] is None
     assert bundle["technicals"]["rsi"]["state"] in ("overbought", "neutral",
                                                     "oversold")
-    assert bundle["verdict"]["grade"]            # graded from yfinance metrics
+    # Enough yfinance metrics to clear the grade floor, so this really is a
+    # graded verdict and not the "N/A" that too-thin coverage returns.
+    assert bundle["verdict"]["grade"] in "ABCDF"
     assert bundle["snapshot"]["price"] == 230.0
     assert bundle["analyst"]["targets"]["current"] == 230.0
 
@@ -490,6 +495,96 @@ def test_bundle_fetcher_threads_market_cap_into_build_fundamentals():
         src=stub_src(build_fundamentals=spy_build_fundamentals))
     fetcher.fetch("AAPL")
     assert captured["market_cap"] == 3.5e12   # from stub_src's yf_quote
+
+
+class RecordingFMP:
+    """Serves a profile row and an empty payload for everything else (empty is
+    a valid response, not a gating error), recording each endpoint asked for."""
+    def __init__(self):
+        self.calls_used = 0
+        self.endpoints = []
+
+    def get(self, endpoint, **params):
+        self.calls_used += 1
+        self.endpoints.append(endpoint)
+        if endpoint == "profile":
+            return [{"companyName": "Invesco QQQ Trust, Series 1",
+                     "sector": "Financial Services",
+                     "industry": "Asset Management"}]
+        return []
+
+
+FUNDAMENTAL_ENDPOINTS = {"income-statement", "balance-sheet-statement",
+                         "cash-flow-statement", "ratios-ttm",
+                         "key-metrics-ttm"}
+
+
+def fund_src(quote_type="ETF"):
+    return stub_src(yf_quote=lambda t: {
+        "name": "Invesco QQQ Trust, Series 1", "quoteType": quote_type,
+        "sector": None, "industry": None, "price": 718.96,
+        "dayChangePct": 0.35, "marketCap": None, "peRatio": 29.303808,
+        "week52Low": 402.39, "week52High": 720.11})
+
+
+def test_fund_is_not_graded_and_its_fundamentals_are_not_fetched():
+    """QQQ swung F -> A in six days because nine of ten checks were neutral
+    for an ETF, leaving the grade riding on the single trailing-P/E check. A
+    fund reports no company fundamentals — don't fetch or grade them."""
+    fmp = RecordingFMP()
+    bundle = BundleFetcher(fmp, QuotaAV(), src=fund_src()).fetch("QQQ")
+    assert bundle["verdict"] is None
+    assert bundle["fundamentals"] is None
+    assert "fund" in bundle["meta"]["sections"]["fundamentals"]
+    assert FUNDAMENTAL_ENDPOINTS.isdisjoint(fmp.endpoints)
+    # The sections that do apply to a fund are unaffected.
+    assert bundle["technicals"] is not None
+    assert bundle["snapshot"]["price"] == 718.96
+
+
+@pytest.mark.parametrize("quote_type", ["ETF", "MUTUALFUND", "INDEX"])
+def test_every_non_equity_quote_type_skips_the_grade(quote_type):
+    bundle = BundleFetcher(RecordingFMP(), QuotaAV(),
+                           src=fund_src(quote_type)).fetch("QQQ")
+    assert bundle["verdict"] is None
+
+
+@pytest.mark.parametrize("quote_type", ["EQUITY", None])
+def test_equity_or_unknown_quote_type_is_still_graded(quote_type):
+    """A missing quoteType must not silently disable grading: only a
+    positively non-equity type counts as a fund."""
+    fmp = RecordingFMP()
+    bundle = BundleFetcher(fmp, QuotaAV(),
+                           src=fund_src(quote_type)).fetch("QQQ")
+    assert bundle["verdict"] is not None
+    assert FUNDAMENTAL_ENDPOINTS.issubset(fmp.endpoints)
+
+
+def test_fund_does_not_take_a_sector_from_the_fmp_profile():
+    """FMP files QQQ under "Financial Services", which describes the trust and
+    not what it holds — the profile overlay must not relabel a fund. Its name
+    still comes through."""
+    bundle = BundleFetcher(RecordingFMP(), QuotaAV(),
+                           src=fund_src()).fetch("QQQ")
+    assert bundle["meta"]["sections"]["profile"] == "fmp"
+    assert bundle["snapshot"]["name"] == "Invesco QQQ Trust, Series 1"
+    assert bundle["snapshot"]["sector"] is None
+    assert bundle["snapshot"]["industry"] is None
+
+
+def test_ungraded_verdict_records_no_pass_ratio():
+    """The history chart plots passRatio; an "N/A" verdict's passes/evaluated
+    is the thin-denominator artifact the grade floor exists to suppress, so it
+    must not be recorded as a data point."""
+    summary = analyze_server._summary_of(
+        {"verdict": {"grade": "N/A", "passes": 1, "evaluated": 1}})
+    assert summary["grade"] == "N/A"
+    assert summary["passRatio"] is None
+
+
+def test_missing_verdict_records_no_grade_or_pass_ratio():
+    summary = analyze_server._summary_of({"verdict": None})
+    assert summary["grade"] is None and summary["passRatio"] is None
 
 
 def test_analyzer_today_uses_utc_not_local_calendar_date():
