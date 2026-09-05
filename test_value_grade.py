@@ -104,6 +104,49 @@ def test_all_neutral_is_not_applicable():
     assert "insufficient" in verdict["summary"].lower()
 
 
+def only_checks(*keys):
+    """Metrics with data for `keys` only — every other check goes neutral."""
+    good = good_metrics()
+    metrics = {k: good[k] for k in keys}
+    if "netMargin" in keys:
+        metrics["netMarginYearAgo"] = good["netMarginYearAgo"]
+    return value_grade.compute_verdict(metrics)
+
+
+def test_one_evaluated_check_is_not_graded():
+    """The QQQ bug: an ETF left only the trailing-P/E check with data, so the
+    grade was passes/1 — either 0.0 (F) or 1.0 (A) — and flipped F -> A when
+    that one P/E was revised 30.63 -> 29.30 across the "< 30" threshold."""
+    failing = value_grade.compute_verdict({"peTTM": 30.634703})
+    passing = value_grade.compute_verdict({"peTTM": 29.303808})
+    assert failing["evaluated"] == passing["evaluated"] == 1
+    assert failing["grade"] == passing["grade"] == "N/A"
+
+
+def test_ungraded_verdict_still_reports_its_checks_and_counts():
+    verdict = value_grade.compute_verdict({"peTTM": 22.0, "roe": 0.30})
+    assert verdict["passes"] == 2 and verdict["evaluated"] == 2
+    assert len(verdict["checks"]) == len(value_grade.CHECKS)
+    assert check_by_id(verdict, "pe")["result"] == "pass"
+
+
+@pytest.mark.parametrize("count,graded", [
+    (value_grade.MIN_EVALUATED - 1, False),
+    (value_grade.MIN_EVALUATED, True),
+])
+def test_grade_floor_is_the_boundary(count, graded):
+    keys = [key for key, _, _ in FAILING][:count]
+    verdict = only_checks(*keys)
+    assert verdict["evaluated"] == count
+    assert (verdict["grade"] != "N/A") is graded
+
+
+def test_thin_coverage_summary_names_the_shortfall():
+    verdict = value_grade.compute_verdict({"peTTM": 22.0})
+    assert str(value_grade.MIN_EVALUATED) in verdict["summary"]
+    assert "1 of 10" in verdict["summary"]
+
+
 def test_summary_names_grade_and_weakest_check():
     verdict = value_grade.compute_verdict(good_metrics(peg=3.0))
     assert verdict["grade"] in "ABCDF"

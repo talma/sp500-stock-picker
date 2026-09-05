@@ -2,6 +2,15 @@
 
 GRADE_BANDS = [(0.9, "A"), (0.7, "B"), (0.5, "C"), (0.3, "D")]
 
+# A letter grade only means something when enough of the ten checks actually
+# had data. The grade is passes/evaluated, so a thin denominator turns it into
+# a near-binary artifact of a single number: QQQ (an ETF — nine checks
+# neutral) had nothing but the trailing-P/E check to go on and swung F -> A in
+# six days when that P/E was revised 30.63 -> 29.30, crossing the "< 30" line.
+# Real equities here evaluate six to ten checks, so a floor of five leaves
+# ample headroom while refusing to grade off one or two.
+MIN_EVALUATED = 5
+
 
 def _compare(value, result_if):
     if value is None:
@@ -51,9 +60,13 @@ def compute_verdict(metrics):
     passes = [c for c in checks if c["result"] == "pass"]
     fails = [c for c in checks if c["result"] == "fail"]
 
-    if not evaluated:
-        return {"grade": "N/A", "passes": 0, "evaluated": 0,
-                "summary": "Insufficient data to grade this ticker.",
+    if len(evaluated) < MIN_EVALUATED:
+        return {"grade": "N/A", "passes": len(passes),
+                "evaluated": len(evaluated),
+                "summary": (f"Insufficient data to grade this ticker: only "
+                            f"{len(evaluated)} of {len(checks)} checks had a "
+                            f"value, below the {MIN_EVALUATED} needed for a "
+                            f"grade to mean anything."),
                 "checks": checks}
 
     ratio = len(passes) / len(evaluated)

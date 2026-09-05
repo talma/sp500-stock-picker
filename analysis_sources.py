@@ -76,6 +76,20 @@ class FMPClient:
         return payload
 
 
+EQUITY_QUOTE_TYPE = "EQUITY"
+
+
+def is_non_equity(quote_type):
+    """True only for a positively non-equity Yahoo quoteType ("ETF",
+    "MUTUALFUND", "INDEX"). A missing quoteType is not treated as non-equity,
+    matching how the FMP parsers tolerate missing keys.
+
+    Both the screener's established-equity gate and the analyzer's decision to
+    skip the fundamental grade key off this one predicate, so "what counts as
+    a gradeable company" is defined in exactly one place."""
+    return quote_type not in (None, EQUITY_QUOTE_TYPE)
+
+
 def parse_profile(rows):
     row = rows[0] if rows else {}
     return {"name": _first(row, "companyName", "name"),
@@ -241,6 +255,7 @@ def yf_quote(ticker, ticker_factory=yf.Ticker):
         raise LookupError(f"Unknown or unpriced ticker: {ticker}")
     previous = info.get("regularMarketPreviousClose") or info.get("previousClose")
     return {"name": info.get("longName") or info.get("shortName") or ticker,
+            "quoteType": info.get("quoteType"),
             "sector": info.get("sector"),
             "industry": info.get("industry"),
             "price": price,
@@ -533,11 +548,10 @@ def filter_established(rows, min_history_years, now_ms):
     dropped = {"nonEquity": 0, "unknownListing": 0, "tooYoung": 0}
     for row in rows:
         parsed = parse_screen_row(row, now_ms)
-        # A missing quoteType is tolerated (kept) the same way the FMP
-        # parsers tolerate missing keys; only a positively non-equity
-        # quoteType — an ETF or fund that slipped past the filters — is
-        # dropped as such.
-        if parsed["quoteType"] not in (None, "EQUITY"):
+        # A missing quoteType is tolerated (kept); only a positively
+        # non-equity quoteType — an ETF or fund that slipped past the filters
+        # — is dropped as such. See is_non_equity.
+        if is_non_equity(parsed["quoteType"]):
             dropped["nonEquity"] += 1
         elif parsed["historyYears"] is None:
             dropped["unknownListing"] += 1
