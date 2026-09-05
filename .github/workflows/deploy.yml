@@ -1,0 +1,111 @@
+name: CI / CD
+
+# Tests gate both deploys: nothing reaches Pages or Fly unless the suite is
+# green on the commit being deployed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the Dockerfile base image, so CI exercises the same
+          # interpreter the deploy runs.
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Run tests
+        # The suite is fully mocked and needs no network or credentials.
+        run: python -m pytest -q
+
+  pages:
+    name: Deploy static site to GitHub Pages
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    # One Pages deploy at a time; queue rather than cancel so a merge train
+    # does not leave the site built from an older commit.
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble the static site
+        # An explicit allowlist, not a copy of the repo: this mirrors
+        # Handler._ALLOWED_STATIC_SUFFIXES so the published site can never
+        # pick up Python sources or a stray credentials file.
+        run: |
+          set -euo pipefail
+          mkdir -p _site
+          cp .nojekyll _site/
+          cp index.html ledger.html screener.html stock_analyzer.html \
+             sp500_simulator.html README.md _site/
+          cp ./*.csv _site/
+          cp -R top50_ticker_data _site/
+
+          # Belt and braces: fail the deploy rather than publish a secret.
+          leaked=$(find _site \( -name '*.py' -o -name '*.json' \
+                                 -o -name '.env*' \) -print)
+          if [ -n "$leaked" ]; then
+            echo "refusing to publish non-static files:"
+            echo "$leaked"
+            exit 1
+          fi
+          echo "Publishing $(find _site -type f | wc -l) files"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+  fly:
+    name: Deploy server to Fly.io
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Fly deploys are not safely concurrent against one app.
+    concurrency:
+      group: fly-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # Only the deploy token lives in GitHub. The app's own secrets
+      # (ALPHAVANTAGE_KEY, FMP_KEY, FIREBASE_PROJECT_ID,
+      # FIREBASE_SERVICE_ACCOUNT_JSON) are set once with `flyctl secrets set`
+      # and persist across deploys — see the README.
+      - name: Deploy
+        run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

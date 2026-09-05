@@ -1,0 +1,23 @@
+# Credentials must never enter the image: the server reads them from the
+# environment at runtime instead.
+.env
+*.json
+
+.git
+.gitignore
+.github
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.idea/
+.claude/
+.superpowers/
+.boost/
+.dockerignore
+Dockerfile
+fly.toml
+
+# The CSVs under top50_ticker_data/ and the repo root are NOT excluded: the
+# Ledger fetches them from the same origin at runtime.

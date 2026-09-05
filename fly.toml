@@ -1,0 +1,44 @@
+# fly.toml — S&P 500 Toolkit (shell + all three tool pages + the /api server).
+#
+# Everything is served from this one app, so the pages talk to "/api/..." on
+# their own origin and need no CORS. Rename `app` before the first deploy:
+# Fly app names are globally unique.
+
+app = "sp500-toolkit"
+primary_region = "fra"          # closest Fly region; change freely
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # Flags passed through to analyze_server.py by docker-entrypoint.sh.
+  # --local-technicals computes RSI/MACD/SMA from Yahoo prices, costing 1
+  # Alpha Vantage call per ticker instead of 5. On the free 25 req/day quota
+  # that is the difference between ~4 and ~20 fresh tickers a day, which
+  # matters much more for a public deploy than for a local run.
+  ANALYZE_ARGS = "--local-technicals"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Scale to zero when idle. The first request after a stop pays a cold start
+  # (importing pandas/yfinance), which is the tradeoff for an idle cost of ~$0
+  # on a toolkit that is browsed occasionally rather than continuously.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/"                  # the shell; see Handler.ROOT_DOCUMENT
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+
+[[vm]]
+  # pandas, yfinance and the grpc stack firebase-admin pulls in do not fit
+  # comfortably in 512MB once a screen is running over several tickers.
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1

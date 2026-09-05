@@ -100,6 +100,9 @@
              autocomplete="off" spellcheck="false">
       <button id="analyze-btn">Analyze</button>
     </div>
+    <div style="text-align:center;font-size:12px;letter-spacing:1px;
+                text-transform:uppercase" id="page-nav">
+      <a class="datelink" href="screener.html">← The Screening Desk</a></div>
     <div class="status" id="status"></div>
   </header>
 
@@ -189,6 +192,17 @@ const setStatus = (text, isError) => {
 };
 
 let currentTicker = null;
+
+// Inside app.html's tab rail the shell owns navigation between tools, so this
+// page's own cross-page link is redundant. Guarded: reading parent.appShell
+// throws if the parent is ever cross-origin.
+const shell = (() => {
+  try {
+    return window.parent !== window && window.parent.appShell
+      ? window.parent.appShell : null;
+  } catch { return null; }
+})();
+if (shell) $("page-nav").classList.add("hidden");
 
 async function api(path) {
   if (location.protocol === "file:") {

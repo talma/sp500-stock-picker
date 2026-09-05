@@ -1,5 +1,5 @@
 # analyze_server.py
-"""Local analysis server: static files + /api/analyze|analyzed|history.
+"""Local analysis server: static files + /api/analyze|analyzed|history|screen.
 Run: python3 analyze_server.py [--port 8000] [--local-technicals]"""
 import argparse
 import collections
@@ -7,6 +7,7 @@ import datetime
 import json
 import os
 import threading
+import time
 import urllib.parse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,17 +20,31 @@ import value_grade
 from firestore_store import _now_iso
 
 
+# Config keys the server reads. A container deploy ships no .env and injects
+# these as real environment variables instead (Fly secrets), so load_env has
+# to consider both sources rather than the file alone.
+ENV_KEYS = ("ALPHAVANTAGE_KEY", "FMP_KEY", "FIREBASE_PROJECT_ID",
+            "GOOGLE_APPLICATION_CREDENTIALS")
+
+
 def load_env(path=".env"):
+    """Reads `path` if it exists, then lets real environment variables win.
+
+    Local runs keep working off the .env file. In a container there is no
+    .env and the process environment is the only source; the overlay also
+    means a deployed secret always beats a stale value baked into an image."""
     values = {}
     env_path = Path(path)
-    if not env_path.exists():
-        return values
-    for line in env_path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip()] = value.strip().strip("'\"")
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip().strip("'\"")
+    for key in ENV_KEYS:
+        if os.environ.get(key):
+            values[key] = os.environ[key]
     return values
 
 
@@ -292,7 +307,155 @@ class Analyzer:
         return {"ticker": ticker, "summaries": doc.get("summaries", {})}
 
 
-def handle_api(path, query, analyzer):
+DEFAULT_SCREEN_CRITERIA = {
+    "exchanges": ["NMS", "NYQ"],       # NasdaqGS + NYSE: the established venues
+    "minMarketCap": 2_000_000_000,
+    "minAvgVolume": 500_000,
+    "minHistoryYears": 1.0,
+    "sortField": "intradaymarketcap",
+    "sortAsc": False,
+    "limit": 100,
+}
+SCREEN_LIMIT_MAX = 500
+
+
+class Screener:
+    """Runs Yahoo screens and applies the established-listing gate.
+
+    Results are cached in memory for `ttl_seconds` per distinct criteria set,
+    because the page re-runs the same screen on every reload and every
+    re-scan. Nothing is written to Firestore: a screen is a snapshot of live
+    market state, not an analysis worth archiving alongside dated bundles.
+
+    Unlike Analyzer._macro, the fetch deliberately runs *outside* the lock.
+    The macro path serializes because Alpha Vantage has a hard 25-call daily
+    budget that a duplicate fetch permanently spends; Yahoo's screener needs
+    no key and has no such budget, so two concurrent identical screens cost
+    only a little redundant time — not worth blocking every other screen for
+    the duration of a network call.
+    """
+
+    CACHE_MAX = 32              # bounded: criteria come from query params
+
+    def __init__(self, src=analysis_sources, ttl_seconds=900, now=None):
+        self.src = src
+        self.ttl_seconds = ttl_seconds
+        self._now = now or time.time
+        self._cache = collections.OrderedDict()
+        self._cache_lock = threading.Lock()
+
+    def _cache_key(self, criteria):
+        return json.dumps(criteria, sort_keys=True, default=str)
+
+    @staticmethod
+    def _detach(payload, from_cache):
+        """An independent view of a cached payload. The meta dict and the
+        results list are copied, not shared: handing back the stored objects
+        would let one caller's mutation corrupt what every later caller
+        reads — the same aliasing guard the store makes for daily bundles.
+        The row dicts inside the list stay shared, and are only ever read."""
+        detached = dict(payload)
+        detached["meta"] = dict(payload["meta"], fromCache=from_cache)
+        detached["results"] = list(payload["results"])
+        return detached
+
+    def _cached(self, key):
+        with self._cache_lock:
+            entry = self._cache.get(key)
+            if entry is None or self._now() - entry[0] >= self.ttl_seconds:
+                return None
+            self._cache.move_to_end(key)
+            payload = entry[1]
+        return self._detach(payload, True)
+
+    def _remember(self, key, payload):
+        with self._cache_lock:
+            self._cache[key] = (self._now(), payload)
+            self._cache.move_to_end(key)
+            while len(self._cache) > self.CACHE_MAX:
+                self._cache.popitem(last=False)
+
+    def screen(self, criteria):
+        key = self._cache_key(criteria)
+        cached = self._cached(key)
+        if cached is not None:
+            return cached
+        query = self.src.build_screen_query(criteria)   # ValueError if invalid
+        rows, total = self.src.yf_screen_all(
+            query, limit=criteria["limit"],
+            sort_field=criteria["sortField"], sort_asc=criteria["sortAsc"])
+        kept, dropped = self.src.filter_established(
+            rows, criteria["minHistoryYears"], self._now() * 1000)
+        payload = {"criteria": criteria,
+                   "results": kept,
+                   "meta": {"fetchedAt": _now_iso(),
+                            "totalMatches": total,
+                            "fetched": len(rows),
+                            "kept": len(kept),
+                            "dropped": dropped,
+                            "fromCache": False}}
+        self._remember(key, payload)
+        return self._detach(payload, False)
+
+
+def _screen_number(raw, name):
+    """Coerce one screener query parameter to a finite, non-negative float.
+
+    NaN and infinity are rejected rather than passed through: json.dumps
+    renders them as bare NaN/Infinity tokens, which are not legal JSON, and
+    the page would receive a body it cannot parse instead of a clear error."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a number, got: {raw!r}")
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError(f"{name} must be a finite number, got: {raw!r}")
+    if value < 0:
+        raise ValueError(f"{name} must not be negative, got: {raw!r}")
+    return value
+
+
+def parse_screen_criteria(param):
+    """Query parameters -> a fully defaulted criteria dict. Raises
+    ValueError with a message meant for the user on anything unparseable."""
+    criteria = dict(DEFAULT_SCREEN_CRITERIA,
+                    exchanges=list(DEFAULT_SCREEN_CRITERIA["exchanges"]))
+
+    raw_exchanges = param("exchanges")
+    if raw_exchanges is not None:
+        codes = [code.strip().upper()
+                 for code in raw_exchanges.split(",") if code.strip()]
+        if not codes:
+            raise ValueError("exchanges must name at least one exchange code")
+        criteria["exchanges"] = codes
+
+    if param("sector"):
+        criteria["sector"] = param("sector")
+
+    for name in (*analysis_sources.SCREEN_NUMERIC_FILTERS, "minHistoryYears"):
+        raw = param(name)
+        if raw not in (None, ""):
+            criteria[name] = _screen_number(raw, name)
+
+    raw_limit = param("limit")
+    if raw_limit not in (None, ""):
+        limit = int(_screen_number(raw_limit, "limit"))
+        if not 1 <= limit <= SCREEN_LIMIT_MAX:
+            raise ValueError(
+                f"limit must be between 1 and {SCREEN_LIMIT_MAX}, "
+                f"got: {raw_limit!r}")
+        criteria["limit"] = limit
+
+    sort_field = param("sortField")
+    if sort_field:
+        if sort_field not in analysis_sources.SCREEN_SORT_FIELDS:
+            raise ValueError(f"Unsupported sortField: {sort_field}")
+        criteria["sortField"] = sort_field
+    criteria["sortAsc"] = param("sortAsc") == "1"
+    return criteria
+
+
+def handle_api(path, query, analyzer, screener=None):
     def param(name):
         values = query.get(name) or []
         return values[0] if values else None
@@ -327,11 +490,29 @@ def handle_api(path, query, analyzer):
         except NotFound as error:
             return 404, {"error": str(error)}
 
+    if path == "/api/screen":
+        if screener is None:
+            return 404, {"error": "Screening is not enabled on this server"}
+        try:
+            criteria = parse_screen_criteria(param)
+            return 200, screener.screen(criteria)
+        except analysis_sources.ScreenUnavailable as error:
+            # Upstream was unreachable, not a bad request: 503 tells the page
+            # (and any client) that retrying the same criteria is worthwhile.
+            _log_degradation("screen", "yahoo", error)
+            return 503, {"error": str(error)}
+        except ValueError as error:
+            # Both the parameter coercion above and the query builder inside
+            # screen() reject bad input this way — either is the caller's
+            # fault, so both are a 400 rather than a server error.
+            return 400, {"error": str(error)}
+
     return 404, {"error": f"Unknown API path: {path}"}
 
 
 class Handler(SimpleHTTPRequestHandler):
     analyzer = None    # set in main()
+    screener = None    # set in main()
 
     # Only these extensions are ever servable as static files. An allowlist
     # keeps "a new file appears in the repo root" default to *not served* —
@@ -342,6 +523,13 @@ class Handler(SimpleHTTPRequestHandler):
     _ALLOWED_STATIC_SUFFIXES = {".html", ".htm", ".css", ".js", ".csv",
                                 ".md", ".txt"}
 
+    # The site root is the toolkit shell. This is a rewrite to an explicit
+    # filename rather than a relaxation of the allowlist above, so
+    # "/top50_ticker_data/" stays a 404 instead of becoming a directory
+    # listing, and "/" cannot fall through to SimpleHTTPRequestHandler's own
+    # index-or-listing behaviour.
+    ROOT_DOCUMENT = "/index.html"
+
     @classmethod
     def _is_servable_static_path(cls, path):
         segments = [s for s in urllib.parse.unquote(path).split("/") if s]
@@ -351,7 +539,11 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _handle_static(self, super_method):
         parsed = urllib.parse.urlsplit(self.path)
-        if not self._is_servable_static_path(parsed.path):
+        path = parsed.path
+        if path == "/":
+            path = self.ROOT_DOCUMENT
+            self.path = parsed._replace(path=path).geturl()
+        if not self._is_servable_static_path(path):
             self.send_error(404, "File not found")
             return
         super_method()
@@ -370,7 +562,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             status, payload = handle_api(
                 parsed.path, urllib.parse.parse_qs(parsed.query),
-                self.analyzer)
+                self.analyzer, self.screener)
         except Exception as error:
             print(f"ERROR: unhandled exception in {parsed.path}: {error}")
             status, payload = 500, {"error": str(error)}
@@ -413,9 +605,10 @@ def main():
     store = firestore_store.Store(project_id=env.get("FIREBASE_PROJECT_ID"))
     fetcher = BundleFetcher(fmp, av, local_technicals=args.local_technicals)
     Handler.analyzer = Analyzer(store, fetcher)
+    Handler.screener = Screener()
 
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
-    print(f"Serving http://{args.bind}:{args.port}/stock_analyzer.html "
+    print(f"Serving http://{args.bind}:{args.port}/ (toolkit shell) "
           f"(bind: {args.bind}, store: {store.kind}, technicals: "
           f"{'local' if args.local_technicals else 'alpha vantage'})")
     server.serve_forever()

@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Screening Desk — US Market Screener</title>
+<style>
+  :root {
+    --paper: #f7f3e8; --paper-dark: #efe9d8; --ink: #1c1b16;
+    --ink-soft: #55524a; --rule: #8b8674; --accent: #7a1f1f;
+    --good: #2e6b30; --bad: #9c2b2b; --neutral: #8a7b3a;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--paper); color: var(--ink); margin: 0;
+         font-family: Georgia, "Times New Roman", serif; }
+  .sheet { max-width: 1240px; margin: 0 auto; padding: 24px 28px 60px; }
+  .mono { font-family: "Courier New", Courier, monospace; }
+  h1 { font-size: 44px; letter-spacing: 2px; text-align: center;
+       margin: 8px 0 2px; text-transform: uppercase; }
+  .dateline { text-align: center; color: var(--ink-soft); font-style: italic;
+              border-top: 1px solid var(--rule);
+              border-bottom: 3px double var(--rule);
+              padding: 6px 0; margin-bottom: 18px; }
+  h2 { font-size: 15px; letter-spacing: 3px; text-transform: uppercase;
+       border-bottom: 3px double var(--rule); padding-bottom: 4px;
+       margin: 34px 0 12px; }
+  h2 .asof { float: right; font-size: 11px; letter-spacing: 1px;
+             color: var(--ink-soft); font-family: Courier, monospace; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; font-size: 11px; letter-spacing: 1px;
+       text-transform: uppercase; color: var(--ink-soft);
+       border-bottom: 1px solid var(--rule); padding: 4px 8px; }
+  td { padding: 5px 8px; border-bottom: 1px dotted var(--rule); }
+  td.num, th.num { text-align: right; font-family: Courier, monospace; }
+  tbody tr:hover { background: var(--paper-dark); }
+  .status { font-family: Courier, monospace; font-size: 13px;
+            color: var(--ink-soft); margin: 10px 0; min-height: 18px; }
+  .status.error { color: var(--bad); }
+  button { font-family: Georgia, serif; font-size: 14px; letter-spacing: 1px;
+      text-transform: uppercase; padding: 8px 18px; cursor: pointer;
+      background: var(--ink); color: var(--paper); border: none; }
+  button.ghost { background: none; color: var(--ink);
+      border: 1px solid var(--rule); }
+  button:disabled { opacity: .45; cursor: default; }
+  .nav { text-align: center; font-size: 12px; letter-spacing: 1px;
+         text-transform: uppercase; margin-bottom: 14px; }
+  .nav a { color: var(--accent); margin: 0 10px; }
+  .filters { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px 20px;
+      background: var(--paper-dark); border: 1px solid var(--rule);
+      padding: 14px 18px; }
+  .filters label { display: block; font-size: 11px; letter-spacing: 1px;
+      text-transform: uppercase; color: var(--ink-soft); margin-bottom: 3px; }
+  .filters input, .filters select { width: 100%; padding: 6px 8px;
+      font-family: Courier, monospace; font-size: 14px;
+      border: 1px solid var(--rule); background: #fffdf5; color: var(--ink); }
+  .filters .hint { font-size: 11px; color: var(--ink-soft); font-style: italic; }
+  .venues { display: flex; flex-wrap: wrap; gap: 4px 12px;
+      font-family: Courier, monospace; font-size: 13px; }
+  .venues span { white-space: nowrap; }
+  .venues input { width: auto; }
+  .actions { display: flex; gap: 10px; align-items: center;
+      margin: 14px 0 6px; flex-wrap: wrap; }
+  .actions .spacer { flex: 1; }
+  .badge { font-family: Courier, monospace; font-size: 12px;
+      border: 1px solid var(--rule); padding: 3px 8px;
+      background: var(--paper-dark); }
+  .grade-chip { font-family: Courier, monospace; font-weight: bold;
+      border: 2px solid var(--ink); padding: 0 6px; font-size: 13px; }
+  .grade-chip.A, .grade-chip.B { color: var(--good); border-color: var(--good); }
+  .grade-chip.C, .grade-chip.NA { color: var(--neutral);
+      border-color: var(--neutral); }
+  .grade-chip.D, .grade-chip.F { color: var(--bad); border-color: var(--bad); }
+  .up { color: var(--good); } .down { color: var(--bad); }
+  .foot { color: var(--ink-soft); font-size: 12px;
+      border-top: 3px double var(--rule); margin-top: 40px; padding-top: 10px; }
+  .unavailable { color: var(--ink-soft); font-style: italic;
+      font-family: Courier, monospace; font-size: 13px; }
+  .scanning { background: #fff8dc !important; }
+  a.tickerlink { color: var(--accent); text-decoration: none; }
+  a.tickerlink:hover { text-decoration: underline; }
+  .hidden { display: none; }
+  @media (max-width: 900px) { .filters { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<div class="sheet">
+  <header>
+    <h1>The Screening Desk</h1>
+    <div class="dateline">Established US Listings — Screened Live —
+      <span class="mono" id="todayline"></span></div>
+    <nav class="nav" id="page-nav">
+      <a href="stock_analyzer.html">Equity Dossier →</a>
+      <a href="ledger.html">Stock Picker Simulator →</a>
+      <a href="sp500_simulator.html">S&amp;P 500 Ledger →</a>
+    </nav>
+
+    <section>
+      <h2>Screen Criteria</h2>
+      <div class="filters">
+        <div>
+          <label for="min-market-cap">Min market cap (USD)</label>
+          <input type="number" id="min-market-cap" min="0" step="1e8"
+                 value="2000000000">
+          <div class="hint">2e9 = large/mid caps</div>
+        </div>
+        <div>
+          <label for="min-avg-volume">Min avg daily volume (3m)</label>
+          <input type="number" id="min-avg-volume" min="0" step="50000"
+                 value="500000">
+          <div class="hint">liquidity floor, in shares</div>
+        </div>
+        <div>
+          <label for="min-history">Min years of price history</label>
+          <input type="number" id="min-history" min="0" step="0.5" value="1">
+          <div class="hint">excludes recent IPOs and new listings</div>
+        </div>
+        <div>
+          <label for="sector">Sector</label>
+          <select id="sector">
+            <option value="">Any sector</option>
+            <option>Basic Materials</option>
+            <option>Communication Services</option>
+            <option>Consumer Cyclical</option>
+            <option>Consumer Defensive</option>
+            <option>Energy</option>
+            <option>Financial Services</option>
+            <option>Healthcare</option>
+            <option>Industrials</option>
+            <option>Real Estate</option>
+            <option>Technology</option>
+            <option>Utilities</option>
+          </select>
+        </div>
+        <div>
+          <label for="max-pe">Max trailing P/E</label>
+          <input type="number" id="max-pe" min="0" step="1" placeholder="any">
+        </div>
+        <div>
+          <label for="min-roe">Min return on equity (%)</label>
+          <input type="number" id="min-roe" min="0" step="1" placeholder="any">
+        </div>
+        <div>
+          <label for="min-dividend">Min dividend yield (%)</label>
+          <input type="number" id="min-dividend" min="0" step="0.5"
+                 placeholder="any">
+        </div>
+        <div>
+          <label for="max-beta">Max beta</label>
+          <input type="number" id="max-beta" min="0" step="0.1"
+                 placeholder="any">
+        </div>
+        <div>
+          <label>Venues</label>
+          <div class="venues" id="venues">
+            <span><input type="checkbox" value="NMS" checked> NasdaqGS</span>
+            <span><input type="checkbox" value="NYQ" checked> NYSE</span>
+            <span><input type="checkbox" value="NGM"> NasdaqGM</span>
+            <span><input type="checkbox" value="NCM"> NasdaqCM</span>
+            <span><input type="checkbox" value="ASE"> NYSE American</span>
+          </div>
+        </div>
+        <div>
+          <label for="sort-field">Rank by</label>
+          <select id="sort-field">
+            <option value="intradaymarketcap">Market cap</option>
+            <option value="avgdailyvol3m">Average volume</option>
+            <option value="fiftytwowkpercentchange">52-week change</option>
+            <option value="peratio.lasttwelvemonths">Trailing P/E</option>
+            <option value="dividendyield">Dividend yield</option>
+            <option value="percentchange">Today's change</option>
+          </select>
+        </div>
+        <div>
+          <label for="sort-dir">Order</label>
+          <select id="sort-dir">
+            <option value="desc">Highest first</option>
+            <option value="asc">Lowest first</option>
+          </select>
+        </div>
+        <div>
+          <label for="limit">Max rows to fetch</label>
+          <input type="number" id="limit" min="1" max="500" step="50"
+                 value="100">
+          <div class="hint">250 rows per Yahoo request</div>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="screen-btn">Run screen</button>
+        <button class="ghost" id="reset-btn">Reset</button>
+        <span class="spacer"></span>
+        <button class="ghost" id="select-all-btn" disabled>Select all</button>
+        <button class="ghost" id="clear-sel-btn" disabled>Clear</button>
+        <button id="scan-btn" disabled
+          title="Runs the full Equity Dossier analysis on each selected ticker. Costs API quota per ticker.">
+          Scan selected via analyzer</button>
+        <button class="ghost hidden" id="cancel-scan-btn">Stop scan</button>
+      </div>
+      <div class="status" id="status"></div>
+    </section>
+  </header>
+
+  <main>
+    <section>
+      <h2>Results <span class="asof" id="results-asof"></span></h2>
+      <div id="summary-line" class="unavailable">
+        Set your criteria above and run a screen.</div>
+      <table class="hidden" id="results-table">
+        <thead><tr>
+          <th style="width:28px"></th>
+          <th>Ticker</th><th>Company</th>
+          <th class="num">Price</th><th class="num">Day</th>
+          <th class="num">Mkt cap</th><th class="num">P/E</th>
+          <th class="num">Div %</th><th class="num">Avg vol</th>
+          <th class="num">52w</th><th class="num">Yrs</th>
+          <th>Analysts</th><th>Grade</th>
+        </tr></thead>
+        <tbody id="results-rows"></tbody>
+      </table>
+    </section>
+    <div class="foot" id="footnotes">
+      Universe and filters: Yahoo Finance screener via <span class="mono">yfinance</span>
+      (no API key, unofficial endpoint). The years-of-history column is derived
+      from each listing's first trade date, the only listing-age signal Yahoo
+      returns — it is not a filterable field upstream, so the gate is applied
+      after fetching. A column can read <span class="mono">—</span> for a
+      metric the row was filtered on: Yahoo populates its filter fields and
+      its quote fields from different pipelines, so a name with no trailing
+      P/E (negative earnings) can still satisfy a max-P/E filter. Grades come
+      from the Equity Dossier archive. Not investment advice.
+    </div>
+  </main>
+</div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtNum = (v, d = 2) => v == null ? "—" :
+  Number(v).toLocaleString("en-US", {maximumFractionDigits: d});
+const fmtMoney = v => {
+  if (v == null) return "—";
+  const abs = Math.abs(v);
+  if (abs >= 1e12) return fmtNum(v / 1e12) + "T";
+  if (abs >= 1e9) return fmtNum(v / 1e9) + "B";
+  if (abs >= 1e6) return fmtNum(v / 1e6) + "M";
+  if (abs >= 1e3) return fmtNum(v / 1e3, 0) + "K";
+  return fmtNum(v);
+};
+const setStatus = (text, isError) => {
+  const el = $("status");
+  el.textContent = text || "";
+  el.classList.toggle("error", !!isError);
+};
+
+/* ---------- app.html shell integration ---------- */
+// When this page runs inside app.html's tab rail, the shell owns navigation:
+// its own cross-page links are redundant, and a ticker click should switch to
+// the Dossier tab instead of opening a second browser tab. Accessing
+// parent.appShell is guarded because a cross-origin parent throws on access.
+const shell = (() => {
+  try {
+    return window.parent !== window && window.parent.appShell
+      ? window.parent.appShell : null;
+  } catch { return null; }
+})();
+
+if (shell) $("page-nav").classList.add("hidden");
+
+async function api(path) {
+  if (location.protocol === "file:") {
+    throw new Error("This page must be served over HTTP. Run: " +
+      "python3 analyze_server.py, then open http://localhost:8000/screener.html");
+  }
+  let response;
+  try { response = await fetch(path); }
+  catch { throw new Error("Cannot reach the API — is analyze_server.py running?"); }
+  let payload;
+  try {
+    payload = await response.json();
+  } catch (parseError) {
+    // A malformed body must surface as an error rather than silently
+    // becoming {} and rendering as an empty, unexplained result set.
+    throw new Error(`Server returned invalid JSON (HTTP ${response.status}): ` +
+      parseError.message);
+  }
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload;
+}
+
+/* ---------- criteria <-> form <-> URL ---------- */
+
+// Each entry maps a form control to the query parameter the API expects.
+// `optional: true` means "omit when blank" — an omitted filter is not the
+// same as a zero one, so blank fields must not be sent as 0.
+const NUMERIC_FIELDS = [
+  {id: "min-market-cap", param: "minMarketCap"},
+  {id: "min-avg-volume", param: "minAvgVolume"},
+  {id: "min-history", param: "minHistoryYears"},
+  {id: "max-pe", param: "maxPeRatio", optional: true},
+  {id: "min-roe", param: "minRoe", optional: true},
+  {id: "min-dividend", param: "minDividendYield", optional: true},
+  {id: "max-beta", param: "maxBeta", optional: true},
+  {id: "limit", param: "limit"},
+];
+
+function venueCheckboxes() {
+  return [...$("venues").querySelectorAll("input[type=checkbox]")];
+}
+
+function readCriteria() {
+  const params = new URLSearchParams();
+  for (const {id, param, optional} of NUMERIC_FIELDS) {
+    const raw = $(id).value.trim();
+    if (raw === "") {
+      if (optional) continue;
+      throw new Error(`${$(id).labels[0].textContent} is required.`);
+    }
+    if (!Number.isFinite(Number(raw)))
+      throw new Error(`${$(id).labels[0].textContent} must be a number.`);
+    params.set(param, raw);
+  }
+  const venues = venueCheckboxes().filter(c => c.checked).map(c => c.value);
+  if (!venues.length) throw new Error("Select at least one venue.");
+  params.set("exchanges", venues.join(","));
+  if ($("sector").value) params.set("sector", $("sector").value);
+  params.set("sortField", $("sort-field").value);
+  if ($("sort-dir").value === "asc") params.set("sortAsc", "1");
+  return params;
+}
+
+function applyCriteriaFromUrl() {
+  const params = new URLSearchParams(location.search);
+  if (![...params.keys()].length) return false;
+  for (const {id, param} of NUMERIC_FIELDS)
+    if (params.has(param)) $(id).value = params.get(param);
+  if (params.has("sector")) $("sector").value = params.get("sector");
+  if (params.has("sortField")) $("sort-field").value = params.get("sortField");
+  $("sort-dir").value = params.get("sortAsc") === "1" ? "asc" : "desc";
+  if (params.has("exchanges")) {
+    const wanted = new Set(params.get("exchanges").split(","));
+    venueCheckboxes().forEach(c => { c.checked = wanted.has(c.value); });
+  }
+  return true;
+}
+
+/* ---------- archive grades ---------- */
+
+// Grades already in the Firestore archive, so previously analyzed tickers
+// show a grade without spending any API quota on a re-scan.
+let grades = {};
+
+async function loadGrades() {
+  try {
+    const {tickers} = await api("/api/analyzed");
+    grades = Object.fromEntries(
+      tickers.filter(t => t.latestGrade).map(t => [t.ticker, t.latestGrade]));
+  } catch { grades = {}; }      // a missing archive must not block screening
+}
+
+function gradeCell(ticker) {
+  const grade = grades[ticker];
+  if (!grade) return `<span class="unavailable">—</span>`;
+  return `<span class="grade-chip ${esc(grade.replace(/[^A-Za-z]/g, ""))}">${
+    esc(grade)}</span>`;
+}
+
+/* ---------- screening ---------- */
+
+let results = [];
+
+async function runScreen() {
+  let params;
+  try { params = readCriteria(); }
+  catch (error) { return setStatus(error.message, true); }
+  setStatus("Screening… (paginates 250 rows per request)");
+  $("screen-btn").disabled = true;
+  try {
+    const payload = await api("/api/screen?" + params);
+    results = payload.results;
+    history.replaceState(null, "", "?" + params);
+    renderResults(payload);
+    setStatus("");
+  } catch (error) {
+    setStatus(error.message, true);
+  } finally { $("screen-btn").disabled = false; }
+}
+
+function renderResults(payload) {
+  const meta = payload.meta || {};
+  const dropped = meta.dropped || {};
+  const droppedTotal = (dropped.tooYoung || 0) + (dropped.unknownListing || 0) +
+    (dropped.nonEquity || 0);
+  $("results-asof").textContent = meta.fetchedAt
+    ? (meta.fromCache ? "cached — " : "") +
+      new Date(meta.fetchedAt).toLocaleString()
+    : "";
+  const minYears = payload.criteria?.minHistoryYears;
+  $("summary-line").innerHTML = results.length
+    ? `<span class="badge">${results.length} shown</span>
+       of ${fmtNum(meta.fetched, 0)} fetched from
+       ${fmtNum(meta.totalMatches, 0)} matching Yahoo's filters.
+       ${droppedTotal ? `Excluded ${droppedTotal}:
+         ${dropped.tooYoung || 0} under ${fmtNum(minYears, 1)}y of history,
+         ${dropped.unknownListing || 0} with no listing date,
+         ${dropped.nonEquity || 0} not common equity.` : ""}`
+    : `No listings matched. Yahoo matched ${fmtNum(meta.totalMatches, 0)}
+       before the ${fmtNum(minYears, 1)}-year history gate removed
+       ${droppedTotal} of the ${fmtNum(meta.fetched, 0)} fetched.`;
+  $("summary-line").className = results.length ? "" : "unavailable";
+  $("results-table").classList.toggle("hidden", !results.length);
+
+  const pct = v => v == null ? "—" :
+    `<span class="${v >= 0 ? "up" : "down"}">${v >= 0 ? "▲" : "▼"}${
+      fmtNum(Math.abs(v), 1)}%</span>`;
+  $("results-rows").innerHTML = results.map(r => `
+    <tr data-ticker="${esc(r.ticker)}">
+      <td><input type="checkbox" class="pick" value="${esc(r.ticker)}"></td>
+      <td class="mono"><a class="tickerlink" target="_blank" rel="noopener"
+        href="stock_analyzer.html?ticker=${encodeURIComponent(r.ticker)}"
+        title="Open the Equity Dossier for ${esc(r.ticker)}"><b>${
+        esc(r.ticker)}</b></a></td>
+      <td>${esc(r.name)}<div class="unavailable"
+        style="font-size:11px">${esc(r.exchange ?? "")}</div></td>
+      <td class="num">$${fmtNum(r.price)}</td>
+      <td class="num">${pct(r.dayChangePct)}</td>
+      <td class="num">${fmtMoney(r.marketCap)}</td>
+      <td class="num">${fmtNum(r.peRatio, 1)}</td>
+      <td class="num">${fmtNum(r.dividendYield, 2)}</td>
+      <td class="num">${fmtMoney(r.avgVolume3m)}</td>
+      <td class="num">${pct(r.week52ChangePct)}</td>
+      <td class="num">${fmtNum(r.historyYears, 1)}</td>
+      <td class="mono" style="font-size:12px">${esc(r.analystRating ?? "—")}</td>
+      <td class="grade-cell">${gradeCell(r.ticker)}</td>
+    </tr>`).join("");
+  $("results-rows").querySelectorAll(".pick").forEach(box =>
+    box.addEventListener("change", updateSelectionButtons));
+  updateSelectionButtons();
+}
+
+// Delegated so it survives every re-render. Inside the shell the link's
+// href/target are left intact as the fallback for a middle-click or
+// "open in new tab", which should still work normally.
+$("results-rows").addEventListener("click", event => {
+  const link = event.target.closest("a.tickerlink");
+  if (!shell || !link || event.metaKey || event.ctrlKey || event.shiftKey)
+    return;
+  const ticker = link.closest("tr")?.dataset.ticker;
+  if (ticker && shell.open("analyzer", {ticker})) event.preventDefault();
+});
+
+/* ---------- scan selected via the analyzer ---------- */
+
+let scanCancelled = false;
+
+function selectedTickers() {
+  return [...$("results-rows").querySelectorAll(".pick:checked")]
+    .map(box => box.value);
+}
+
+function updateSelectionButtons() {
+  const count = selectedTickers().length;
+  const hasRows = results.length > 0;
+  $("select-all-btn").disabled = !hasRows;
+  $("clear-sel-btn").disabled = !count;
+  $("scan-btn").disabled = !count;
+  $("scan-btn").textContent = count
+    ? `Scan ${count} via analyzer` : "Scan selected via analyzer";
+}
+
+async function scanSelected() {
+  const tickers = selectedTickers();
+  if (!tickers.length) return;
+  // Only tickers absent from the archive cost quota; say so before asking,
+  // because the difference between "5 tickers" and "5 fresh fetches" is the
+  // difference between free and a whole day's Alpha Vantage budget.
+  const fresh = tickers.filter(t => !grades[t]);
+  if (!confirm(
+      `Scan ${tickers.length} ticker(s) through the Equity Dossier?\n\n` +
+      `${fresh.length} not yet in the archive and will be fetched live, ` +
+      `costing roughly 10 FMP and up to 5 Alpha Vantage calls each ` +
+      `(~${fresh.length * 10} FMP, ~${fresh.length * 5} AV).\n\n` +
+      `Alpha Vantage's free tier allows 25 calls/day — about 4 fresh ` +
+      `tickers, or ~20 if the server runs with --local-technicals. ` +
+      `The rest are served from the archive at no cost.`))
+    return;
+
+  scanCancelled = false;
+  $("scan-btn").disabled = true;
+  $("screen-btn").disabled = true;
+  $("cancel-scan-btn").classList.remove("hidden");
+  const failures = [];
+  let done = 0;
+  for (const ticker of tickers) {
+    if (scanCancelled) break;
+    const row = $("results-rows")
+      .querySelector(`tr[data-ticker="${CSS.escape(ticker)}"]`);
+    row?.classList.add("scanning");
+    setStatus(`Analyzing ${ticker}… (${++done} of ${tickers.length}; ` +
+      `a fresh fetch takes ~15s)`);
+    try {
+      // Sequential, never parallel: each bundle spends metered FMP and Alpha
+      // Vantage quota, and Alpha Vantage also caps requests per minute.
+      const bundle = await api(
+        "/api/analyze?ticker=" + encodeURIComponent(ticker));
+      const grade = bundle.verdict?.grade;
+      if (grade) grades[ticker] = grade;
+      const cell = row?.querySelector(".grade-cell");
+      if (cell) cell.innerHTML = gradeCell(ticker);
+    } catch (error) {
+      failures.push(`${ticker}: ${error.message}`);
+    } finally { row?.classList.remove("scanning"); }
+  }
+  $("cancel-scan-btn").classList.add("hidden");
+  $("screen-btn").disabled = false;
+  updateSelectionButtons();
+  const scanned = done - failures.length;
+  setStatus(
+    `${scanCancelled ? "Scan stopped" : "Scan complete"} — ${scanned} ` +
+    `analyzed${failures.length ? `, ${failures.length} failed: ` +
+      failures.join("; ") : "."}`,
+    failures.length > 0);
+}
+
+/* ---------- wiring ---------- */
+$("screen-btn").addEventListener("click", runScreen);
+$("reset-btn").addEventListener("click", () => {
+  history.replaceState(null, "", location.pathname);
+  location.reload();
+});
+$("select-all-btn").addEventListener("click", () => {
+  $("results-rows").querySelectorAll(".pick")
+    .forEach(box => { box.checked = true; });
+  updateSelectionButtons();
+});
+$("clear-sel-btn").addEventListener("click", () => {
+  $("results-rows").querySelectorAll(".pick")
+    .forEach(box => { box.checked = false; });
+  updateSelectionButtons();
+});
+$("scan-btn").addEventListener("click", scanSelected);
+$("cancel-scan-btn").addEventListener("click", () => {
+  scanCancelled = true;
+  setStatus("Stopping after the ticker in flight…");
+});
+$("todayline").textContent = new Date().toDateString();
+
+if (location.protocol === "file:") {
+  setStatus("Serve over HTTP: python3 analyze_server.py, then open " +
+            "http://localhost:8000/screener.html", true);
+} else {
+  const hadUrlCriteria = applyCriteriaFromUrl();
+  loadGrades().then(() => { if (hadUrlCriteria) runScreen(); });
+}
+</script>
+</body>
+</html>
