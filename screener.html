@@ -266,14 +266,43 @@ const shell = (() => {
 
 if (shell) $("page-nav").classList.add("hidden");
 
+// The API may be hosted on a scale-to-zero container, where the first request
+// after an idle period waits ~20s while the machine boots. A proxy that cuts
+// the connection in the meantime makes fetch() reject even though the server
+// is coming up perfectly well, so one rejection is retried rather than
+// reported. Retrying is safe even for /api/analyze: the server de-duplicates
+// in-flight work and caches each ticker per day, so a second call reuses the
+// first one's result instead of spending fresh API quota.
+const API_RETRY_DELAY_MS = 2000;
+
+const onLocalHost = () =>
+  ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+
+// "is analyze_server.py running?" is only useful advice when the server is
+// meant to be yours; on a deployed origin it sends the reader chasing the
+// wrong problem.
+const unreachableMessage = () => onLocalHost()
+  ? "Cannot reach the API — is analyze_server.py running?"
+  : "Cannot reach the API — the server may still be waking up. "
+    + "Wait a moment and try again.";
+
+async function fetchRetryingOnce(path) {
+  try {
+    return await fetch(path);
+  } catch {
+    await new Promise(resolve => setTimeout(resolve, API_RETRY_DELAY_MS));
+    return fetch(path);   // a second rejection propagates to the caller
+  }
+}
+
 async function api(path) {
   if (location.protocol === "file:") {
     throw new Error("This page must be served over HTTP. Run: " +
       "python3 analyze_server.py, then open http://localhost:8000/screener.html");
   }
   let response;
-  try { response = await fetch(path); }
-  catch { throw new Error("Cannot reach the API — is analyze_server.py running?"); }
+  try { response = await fetchRetryingOnce(path); }
+  catch { throw new Error(unreachableMessage()); }
   let payload;
   try {
     payload = await response.json();
