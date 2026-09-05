@@ -215,8 +215,23 @@ window.appShell = {
 
 /* ---------- server reachability ---------- */
 // The Ledger reads CSVs and works anywhere, including GitHub Pages. The other
-// two need analyze_server.py, so say so up front rather than letting the user
+// two need the analysis API, so say so up front rather than letting the user
 // meet "Cannot reach the API" inside a tab.
+//
+// One probe is not enough on a scale-to-zero host: this runs at page load,
+// which is exactly when the machine is most likely still booting, and a
+// dropped connection then mislabels a perfectly healthy deploy as serverless.
+// So a failure is retried once before the tabs get warned.
+const PROBE_RETRY_DELAY_MS = 2000;
+
+const onLocalHost = () =>
+  ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+
+async function probeServer() {
+  const response = await fetch("/api/analyzed", {cache: "no-store"});
+  if (!response.ok) throw new Error(String(response.status));
+}
+
 async function checkServer() {
   const status = $("server-status");
   if (location.protocol === "file:") {
@@ -224,13 +239,21 @@ async function checkServer() {
       "file:// — run analyze_server.py", "opened from disk");
   }
   try {
-    const response = await fetch("/api/analyzed", {cache: "no-store"});
-    if (!response.ok) throw new Error(String(response.status));
-    markServer(status, true, "analyze_server.py up");
+    await probeServer();
   } catch {
-    markServer(status, false, "no analysis server",
-               "needs analyze_server.py");
+    markServer(status, false, "waking server…");
+    await new Promise(resolve => setTimeout(resolve, PROBE_RETRY_DELAY_MS));
+    try {
+      await probeServer();
+    } catch {
+      // Only now is it fair to call it absent, and only the local case has
+      // actionable advice to offer.
+      return markServer(status, false,
+        onLocalHost() ? "no analysis server" : "analysis API unreachable",
+        onLocalHost() ? "needs analyze_server.py" : "API unreachable");
+    }
   }
+  markServer(status, true, "analysis API up");
 }
 
 function markServer(status, up, text, tabNote) {
