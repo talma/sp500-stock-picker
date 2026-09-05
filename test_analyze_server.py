@@ -169,7 +169,16 @@ from analyze_server import Analyzer, BundleFetcher, NotFound, handle_api
 
 # ---------- load_env ----------
 
-def test_load_env(tmp_path):
+@pytest.fixture
+def no_config_env(monkeypatch):
+    """load_env overlays the process environment on top of the file, so these
+    tests must start from a known-empty environment rather than inheriting
+    whatever the developer or CI runner happens to export."""
+    for key in analyze_server.ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_load_env(tmp_path, no_config_env):
     env_file = tmp_path / ".env"
     env_file.write_text(
         "# comment\n\nFMP_KEY=abc123\nALPHAVANTAGE_KEY='quoted'\n"
@@ -181,7 +190,53 @@ def test_load_env(tmp_path):
                        "./firebase-service-account.json"}
 
 
-def test_load_env_missing_file(tmp_path):
+def test_load_env_missing_file(tmp_path, no_config_env):
+    assert analyze_server.load_env(tmp_path / "nope") == {}
+
+
+def test_load_env_reads_process_environment_without_a_file(
+        tmp_path, monkeypatch, no_config_env):
+    """The container deploy ships no .env: Fly secrets arrive as real
+    environment variables, and they must still reach the clients."""
+    monkeypatch.setenv("FMP_KEY", "from-secret")
+    monkeypatch.setenv("FIREBASE_PROJECT_ID", "proj-1")
+
+    env = analyze_server.load_env(tmp_path / "nope")
+
+    assert env == {"FMP_KEY": "from-secret", "FIREBASE_PROJECT_ID": "proj-1"}
+
+
+def test_load_env_process_environment_beats_the_file(
+        tmp_path, monkeypatch, no_config_env):
+    """A rotated deploy secret must win over a stale value baked into an
+    image, so the overlay is applied after the file is parsed."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("FMP_KEY=stale\nALPHAVANTAGE_KEY=kept\n")
+    monkeypatch.setenv("FMP_KEY", "fresh")
+
+    env = analyze_server.load_env(env_file)
+
+    assert env == {"FMP_KEY": "fresh", "ALPHAVANTAGE_KEY": "kept"}
+
+
+def test_load_env_ignores_blank_environment_variables(
+        tmp_path, monkeypatch, no_config_env):
+    """An empty variable is how an unset Fly secret shows up; treating it as
+    a value would blank out a working .env entry on a local run."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("FMP_KEY=real\n")
+    monkeypatch.setenv("FMP_KEY", "")
+
+    assert analyze_server.load_env(env_file) == {"FMP_KEY": "real"}
+
+
+def test_load_env_overlays_only_known_keys(tmp_path, monkeypatch,
+                                           no_config_env):
+    """The overlay is an allowlist: the whole process environment must not
+    leak into the config dict."""
+    monkeypatch.setenv("PATH", "/nope")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "nope")
+
     assert analyze_server.load_env(tmp_path / "nope") == {}
 
 
@@ -670,3 +725,68 @@ def test_do_head_blocks_env_the_same_as_do_get():
     handler.do_HEAD()
 
     assert error_holder["code"] == 404
+
+
+# ==================== Site root serves the toolkit shell ====================
+
+def _static_handler(path):
+    """A Handler wired up just enough to drive _handle_static directly."""
+    import io
+
+    handler = analyze_server.Handler.__new__(analyze_server.Handler)
+    handler.path = path
+    handler.client_address = ("127.0.0.1", 0)
+    handler.wfile = io.BytesIO()
+    calls = {"served": 0, "error": None}
+    handler.send_error = lambda code, message=None: calls.__setitem__(
+        "error", code)
+    return handler, calls, lambda: calls.__setitem__("served",
+                                                     calls["served"] + 1)
+
+
+def test_handle_static_rewrites_root_to_the_shell():
+    """The deployed site root has to render index.html. The allowlist rejects
+    "/" by design, so the rewrite must happen before that check."""
+    handler, calls, super_method = _static_handler("/")
+
+    handler._handle_static(super_method)
+
+    assert calls["error"] is None
+    assert calls["served"] == 1
+    assert handler.path == "/index.html"
+
+
+def test_handle_static_root_rewrite_keeps_the_query_string():
+    handler, calls, super_method = _static_handler("/?ticker=AAPL")
+
+    handler._handle_static(super_method)
+
+    assert calls["served"] == 1
+    assert handler.path == "/index.html?ticker=AAPL"
+
+
+@pytest.mark.parametrize("path", ["/top50_ticker_data/", "/docs/", "/.env"])
+def test_handle_static_root_rewrite_does_not_open_up_directories(path):
+    """Only the bare root is rewritten: any other directory path must stay a
+    404 rather than becoming a listing."""
+    handler, calls, super_method = _static_handler(path)
+
+    handler._handle_static(super_method)
+
+    assert calls["error"] == 404
+    assert calls["served"] == 0
+    assert handler.path == path
+
+
+def test_do_get_serves_the_shell_at_the_root(monkeypatch):
+    """End-to-end through do_GET: "/" must not be treated as an API path and
+    must not 404."""
+    handler, calls, _ = _static_handler("/")
+    monkeypatch.setattr(analyze_server.SimpleHTTPRequestHandler, "do_GET",
+                        lambda self: calls.__setitem__("served", 1))
+
+    handler.do_GET()
+
+    assert calls["error"] is None
+    assert calls["served"] == 1
+    assert handler.path == "/index.html"

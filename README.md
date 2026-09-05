@@ -1,22 +1,56 @@
 # S&P 500 Toolkit
 
+**Start here:** `index.html` puts every tool in one page behind a left-hand tab
+rail. Run `python3 analyze_server.py` and open `http://localhost:8000/`. Each
+tool also remains a working standalone page, listed below. See
+**[Deployment](#deployment)** for the live URLs and the CI/CD pipeline.
+
 This repository hosts multiple, independent S&P 500 apps and tools that share
 the same downloaded price data:
 
-1. **[Stock Picker Simulator](#stock-picker-simulator)** (`index.html`) — a
-   published, browser-only backtest comparing monthly investing, lump-sum
-   investing, and a rule-based stock picker. Served via GitHub Pages; no
-   build step, no server.
-2. **[S&P 500 10-Year Monthly Price Downloader](#sp500-10-year-monthly-price-downloader)**
-   (`download_*.py`) — Python scripts that fetch the price data both apps
-   consume.
-3. **[S&P 500 Ledger simulator](#run-the-simulator)** (`sp500_simulator.html`) —
-   a second, more configurable backtest dashboard over the same downloaded
-   data.
+1. **[Unified dashboard](#unified-dashboard)** (`index.html`) — left-hand tabs
+   over the three tools below, with the screener able to hand a ticker
+   straight to the analyzer tab.
+2. **[S&P 500 Ledger simulator](#stock-picker-simulator)** (`ledger.html`;
+   `sp500_simulator.html` is a byte-identical copy) — a browser-only backtest
+   comparing monthly investing, lump-sum investing, and a rule-based stock
+   picker. No build step, no server.
+3. **[S&P 500 10-Year Monthly Price Downloader](#sp500-10-year-monthly-price-downloader)**
+   (`download_*.py`) — Python scripts that fetch the price data the
+   simulators consume.
 4. **[Stock analyzer / Equity Dossier](#stock-analyzer-equity-dossier)**
    (`stock_analyzer.html` + `analyze_server.py`) — per-ticker value, analyst,
-   news, technical, and macro analysis, backed by a small local API server
+   news, technical, and macro analysis, backed by a small API server
    and Firestore.
+5. **[Screening Desk](#screening-desk)** (`screener.html`, same server) — a
+   live screener over established US listings that hands selected tickers
+   straight to the analyzer.
+
+---
+
+## Unified dashboard
+
+`index.html` is the single-page front end: a left tab rail with **The Ledger**,
+**Screening Desk**, and **Equity Dossier**. Serve it from `analyze_server.py`
+and open `http://localhost:8000/`.
+
+- Each tool loads in its own frame on first visit and stays alive after that,
+  so switching tabs never discards a screen you just ran or a dossier you
+  just fetched.
+- Deep links work and survive a reload: `/#screener`,
+  `/#analyzer?ticker=AAPL`.
+- Clicking a ticker in the Screening Desk switches to the Equity Dossier tab
+  for that ticker instead of opening a new browser tab.
+- The rail collapses to icons, responds to arrow keys, and shows whether
+  the analysis API is reachable — the Ledger tab works without it, the
+  other two do not.
+
+Why frames rather than one merged document: `ledger.html` stays independently
+linkable and works with no server at all, and the three tools have overlapping
+element IDs and global names (`$`, `esc`, `api`, `#status`). Merging them into
+one document would mean either maintaining the Ledger twice or renaming every
+collision across ~2,800 lines of working JavaScript. A frame per tool keeps
+each one exactly as it ships standalone.
 
 ---
 
@@ -24,8 +58,7 @@ the same downloaded price data:
 
 A browser-based educational backtest comparing monthly investing, lump-sum
 investing, and a rule-based stock picker over downloaded monthly S&P 500
-constituent data. Published at the repo's GitHub Pages URL — open
-`index.html` directly, no server required.
+constituent data. Open `ledger.html` — no server required.
 
 ### Features
 
@@ -186,11 +219,12 @@ Run:
 python3 analyze_server.py            # or --local-technicals, see below
 ```
 
-Open `http://localhost:8000/stock_analyzer.html`. The server also serves the
-rest of the project directory, so it replaces `python3 -m http.server` and
-`sp500_simulator.html` keeps working. By default it binds to `127.0.0.1`
-only; pass `--bind 0.0.0.0` to allow other machines on your network to reach
-it.
+Open `http://localhost:8000/stock_analyzer.html`, or `http://localhost:8000/`
+for the tabbed shell. The server also serves the rest of the project
+directory, so it replaces `python3 -m http.server` and `sp500_simulator.html`
+keeps working. By default it binds to `127.0.0.1` only; pass `--bind 0.0.0.0`
+to allow other machines on your network to reach it. See
+[Deployment](#deployment) for running it publicly.
 
 Free-tier quotas: Alpha Vantage allows 25 requests/day (5/minute) — about 4
 freshly analyzed tickers/day. `--local-technicals` computes RSI/MACD/SMA
@@ -201,6 +235,148 @@ credentials the server still runs with an in-memory store (nothing persists;
 the page footnote shows the store status).
 
 Not investment advice.
+
+## Screening Desk
+
+`screener.html` (served by the same `analyze_server.py`, or the **Screening
+Desk** tab of the `index.html` shell) screens established US listings live and
+hands the ones you pick to the analyzer.
+
+Filters, all applied server-side by Yahoo's screener: minimum market cap,
+minimum 3-month average daily volume, sector, maximum trailing P/E, minimum
+return on equity, minimum dividend yield, maximum beta, and venue (NasdaqGS,
+NYSE, NasdaqGM, NasdaqCM, NYSE American — OTC venues are deliberately not
+offered). Defaults are >$2B market cap and >500k average daily volume on
+NasdaqGS + NYSE, ranked by market cap.
+
+**The established-listing gate.** Yahoo has no IPO-date or listing-age filter,
+so "at least N years of price history" cannot be pushed upstream. Every
+screener row does carry `firstTradeDateMilliseconds`, so the gate is applied
+locally after fetching, and the results line reports exactly what it removed
+(*"23 shown of 25 fetched from 1,634 matching Yahoo's filters. Excluded 2: 2
+under 1y of history…"*). Rows with no listing date are dropped rather than
+kept — the gate exists to require a proven track record, and an unknown
+listing date is not proof of one. So are rows whose `quoteType` is positively
+not `EQUITY`.
+
+**Scanning via the analyzer.** Tick rows and press *Scan N via analyzer* to
+run each through the full Equity Dossier pipeline; grades land in the table's
+Grade column. Scans run strictly sequentially and the confirm dialog
+distinguishes tickers already in the Firestore archive (free) from fresh
+fetches (~10 FMP + up to 5 Alpha Vantage calls each), because Alpha Vantage's
+25 calls/day is only ~4 fresh tickers — ~20 with `--local-technicals`. A
+running scan can be stopped between tickers. Tickers already in the archive
+show their grade on load at no API cost.
+
+Screen results are cached in memory for 15 minutes per distinct filter set and
+are never written to Firestore: a screen is a snapshot of live market state,
+not an analysis worth archiving. Criteria live in the URL, so a screen is
+shareable and survives a reload.
+
+Data source is the Yahoo Finance screener via `yfinance` — no API key, but an
+unofficial endpoint, with the same firewall caveat as the rest of the Yahoo
+data below. A column can read `—` for a metric the row was filtered on:
+Yahoo populates its filter fields and its quote fields from different
+pipelines, so a name with no trailing P/E (negative earnings) can still
+satisfy a max-P/E filter.
+
+Not investment advice.
+
+---
+
+## Deployment
+
+Two targets, both driven by `.github/workflows/deploy.yml` on every push to
+`main`. The `test` job runs the full pytest suite first and **both deploys
+depend on it**, so a red suite blocks the release.
+
+| Target | Serves | Works without the API? |
+| --- | --- | --- |
+| **Fly.io** | The whole toolkit: shell, all three tabs, CSVs **and** `/api/...` | — it *is* the API |
+| **GitHub Pages** | Static mirror of the same pages | Ledger only; the other two tabs show "needs analyze_server.py" |
+
+`analyze_server.py` is itself a static file server, so the Fly app serves the
+pages and the API from one origin. That is why the pages keep their plain
+`/api/...` paths with no CORS headers and no API base URL to configure. The
+Pages mirror exists so the Ledger stays reachable for free even when the Fly
+machine is stopped.
+
+### One-time setup
+
+**1. GitHub Pages** — repo *Settings → Pages → Build and deployment → Source:
+**GitHub Actions***. No branch to pick; the workflow uploads the artifact.
+
+**2. Fly.io** — install [`flyctl`](https://fly.io/docs/flyctl/install/), then:
+
+```bash
+flyctl auth login
+# Fly app names are globally unique — pick your own and put it in fly.toml.
+flyctl launch --no-deploy --copy-config --name your-app-name
+```
+
+Give the app its secrets. These are set **once on Fly** and persist across
+deploys, so they never need to live in GitHub:
+
+```bash
+flyctl secrets set \
+  ALPHAVANTAGE_KEY=... \
+  FMP_KEY=... \
+  FIREBASE_PROJECT_ID=... \
+  FIREBASE_SERVICE_ACCOUNT_JSON="$(cat firebase-service-account.json)"
+```
+
+`docker-entrypoint.sh` writes that last one back to a file at boot, because
+firebase-admin authenticates through Application Default Credentials and
+requires a file path. Omit it and the server still starts — it falls back to
+the in-memory store and the page footnote says so.
+
+**3. The GitHub deploy token** — the only secret GitHub needs:
+
+```bash
+flyctl tokens create deploy --expiry 8760h    # 1 year
+```
+
+Add the output as repo secret **`FLY_API_TOKEN`** (*Settings → Secrets and
+variables → Actions*).
+
+Push to `main`, and both deploys run.
+
+### Cost and quota
+
+- The Fly app is configured to **scale to zero** (`min_machines_running = 0`),
+  so an idle toolkit costs nothing; the first request after a stop pays a cold
+  start while pandas and yfinance import.
+- `fly.toml` sets `ANALYZE_ARGS = "--local-technicals"`, which computes
+  RSI/MACD/SMA from Yahoo prices instead of Alpha Vantage — 1 AV call per
+  ticker rather than 5, stretching the free 25/day quota from ~4 to ~20 fresh
+  tickers. Remove the flag to go back to Alpha Vantage technicals.
+- **A public deploy spends your API quota and writes to your shared Firestore
+  project, for anyone who finds the URL.** This is the same tradeoff the
+  `--bind 0.0.0.0` help text warns about locally, just with a wider audience.
+  There is no auth in front of it. If that matters, put Fly's built-in
+  [basic auth or an access-control proxy](https://fly.io/docs/) in front, or
+  keep only the Pages mirror public.
+
+### Deploying by hand
+
+```bash
+flyctl deploy                    # or --remote-only, as CI does
+```
+
+### Local container run
+
+```bash
+docker build -t sp500-toolkit .
+docker run --rm -p 8080:8080 \
+  -e ALPHAVANTAGE_KEY=... -e FMP_KEY=... \
+  -e FIREBASE_PROJECT_ID=... \
+  -e FIREBASE_SERVICE_ACCOUNT_JSON="$(cat firebase-service-account.json)" \
+  sp500-toolkit
+```
+
+Then open `http://localhost:8080/`. `load_env()` reads `.env` when present and
+lets real environment variables override it, which is what makes the same
+`analyze_server.py` work both locally and in the container.
 
 ## Notes
 

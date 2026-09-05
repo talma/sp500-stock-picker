@@ -1,5 +1,6 @@
 """All external data access: FMP, yfinance, Alpha Vantage. Parsers are pure."""
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -361,6 +362,190 @@ def yf_analyst(ticker, ticker_factory=yf.Ticker):
             "targets": {"low": targets.get("low"), "mean": targets.get("mean"),
                         "high": targets.get("high")},
             "upgradesDowngrades": changes}
+
+
+# ---------- Yahoo screener ----------
+
+SCREEN_PAGE_MAX = 250          # Yahoo rejects size > 250 outright
+
+# US exchange codes offered by the screener page. Deliberately excludes the
+# OTC/pink-sheet venues Yahoo also accepts (PNK, OEM, ...): a screen for
+# *established* companies should not surface unlisted shells, and Yahoo's
+# fundamentals for them are too sparse to filter on.
+SCREEN_EXCHANGES = {"NMS": "NasdaqGS", "NGM": "NasdaqGM", "NCM": "NasdaqCM",
+                    "NYQ": "NYSE", "ASE": "NYSE American"}
+
+# Public filter name -> (Yahoo screener field, comparator). Yahoo exposes no
+# listing-age or IPO-date field among its filterable fields, so the
+# "established" gate cannot be pushed server-side; filter_established
+# applies it locally against firstTradeDateMilliseconds, which every
+# response row carries.
+#
+# Units follow Yahoo's own, which are not uniform: dividendyield and
+# returnonequity are percentages (15 means 15%), marketcap and volume are
+# absolute counts.
+SCREEN_NUMERIC_FILTERS = {
+    "minMarketCap": ("intradaymarketcap", "gt"),
+    "minAvgVolume": ("avgdailyvol3m", "gt"),
+    "minDividendYield": ("dividendyield", "gt"),
+    "minRoe": ("returnonequity.lasttwelvemonths", "gt"),
+    "maxPeRatio": ("peratio.lasttwelvemonths", "lt"),
+    "maxBeta": ("beta", "lt"),
+}
+
+SCREEN_SORT_FIELDS = ("intradaymarketcap", "avgdailyvol3m", "percentchange",
+                      "peratio.lasttwelvemonths", "dividendyield",
+                      "fiftytwowkpercentchange")
+
+_MS_PER_YEAR = 365.25 * 24 * 60 * 60 * 1000
+
+# Yahoo's screener endpoint times out often enough in normal use that a single
+# failed request must not become the user's answer. yfinance hardcodes a 30s
+# request timeout inside YfData.post and exposes no way to shorten it, so the
+# retries are few and the whole paginated screen is bounded by a deadline —
+# a browser waiting on this cannot be left hanging for minutes.
+SCREEN_ATTEMPTS = 3
+SCREEN_RETRY_WAIT = 1.5        # seconds, scaled by the attempt number
+SCREEN_DEADLINE = 75           # seconds for the entire paginated screen
+
+
+class ScreenUnavailable(Exception):
+    """Yahoo's screener could not be reached. Deliberately distinct from the
+    ValueError a bad query raises: the caller's criteria were fine, the
+    upstream was not, and the two deserve different HTTP statuses."""
+
+
+def _screen_page(screen_fn, query, offset, size, sort_field, sort_asc,
+                 attempts, sleep, clock, deadline):
+    """Fetch one page, retrying transient upstream failures.
+
+    ValueError and TypeError are re-raised without retrying: those mean the
+    query or this very call is malformed, and retrying a bug three times only
+    delays the report by a minute and a half."""
+    last_error = None
+    attempt = 0
+    while attempt < attempts:
+        attempt += 1
+        try:
+            return screen_fn(query, offset=offset, size=size,
+                             sortField=sort_field, sortAsc=sort_asc) or {}
+        except (ValueError, TypeError):
+            raise
+        except Exception as error:
+            last_error = error
+            if attempt >= attempts or clock() >= deadline:
+                break
+            sleep(SCREEN_RETRY_WAIT * attempt)
+    raise ScreenUnavailable(
+        f"Yahoo's screener did not respond after {attempt} attempt(s) "
+        f"({type(last_error).__name__}). This is usually transient — try "
+        f"again, or lower the row limit.") from last_error
+
+
+def build_screen_query(criteria, query_cls=yf.EquityQuery):
+    """Pure: a criteria dict -> an EquityQuery. The query class validates
+    field names and enum values offline, so a typo'd sector or exchange
+    raises here instead of silently returning an empty result set."""
+    unknown = [code for code in criteria.get("exchanges") or ()
+               if code not in SCREEN_EXCHANGES]
+    if unknown:
+        raise ValueError(f"Unsupported exchange(s): {', '.join(unknown)}")
+
+    terms = [query_cls("eq", ["region", "us"])]
+    if criteria.get("exchanges"):
+        terms.append(query_cls("is-in", ["exchange", *criteria["exchanges"]]))
+    if criteria.get("sector"):
+        terms.append(query_cls("eq", ["sector", criteria["sector"]]))
+    for name, (field, comparator) in SCREEN_NUMERIC_FILTERS.items():
+        if criteria.get(name) is not None:
+            terms.append(query_cls(comparator, [field, criteria[name]]))
+    # "and" over a single operand is rejected by the query class, which a
+    # caller who cleared every optional filter would otherwise hit.
+    return terms[0] if len(terms) == 1 else query_cls("and", terms)
+
+
+def yf_screen_all(query, limit, sort_field="intradaymarketcap",
+                  sort_asc=False, screen_fn=yf.screen,
+                  attempts=SCREEN_ATTEMPTS, sleep=time.sleep,
+                  clock=time.monotonic):
+    """Page through Yahoo's screener until `limit` rows or the matches run
+    out. Returns (raw_rows, total_matches) — total is Yahoo's own count of
+    everything matching server-side, which is usually larger than what was
+    fetched. Raises ScreenUnavailable if a page cannot be fetched at all."""
+    deadline = clock() + SCREEN_DEADLINE
+    rows, total, offset = [], 0, 0
+    while len(rows) < limit:
+        wanted = min(SCREEN_PAGE_MAX, limit - len(rows))
+        page = _screen_page(screen_fn, query, offset, wanted, sort_field,
+                            sort_asc, attempts, sleep, clock, deadline)
+        total = page.get("total") or total
+        quotes = page.get("quotes") or []
+        rows.extend(quotes)
+        offset += len(quotes)
+        # Stop on an empty or short page as well as on reaching `total`:
+        # trusting `total` alone would spin forever whenever Yahoo reports
+        # more matches than it will actually hand back.
+        if not quotes or len(quotes) < wanted or offset >= total:
+            break
+        # Out of time mid-pagination: return the rows that did arrive rather
+        # than failing outright. The caller reports fetched-vs-total, so a
+        # truncated screen already shows up as such instead of as an error.
+        if clock() >= deadline:
+            break
+    return rows[:limit], total
+
+
+def parse_screen_row(row, now_ms):
+    """Pure: one raw Yahoo screener quote -> the fields the screener page
+    renders. historyYears comes from firstTradeDateMilliseconds, the only
+    listing-age signal in the response and the basis of the established
+    gate; it is None when Yahoo omits the date."""
+    first_trade = row.get("firstTradeDateMilliseconds")
+    return {"ticker": row.get("symbol"),
+            "name": row.get("longName") or row.get("shortName")
+                    or row.get("displayName") or row.get("symbol"),
+            "exchange": row.get("fullExchangeName"),
+            "quoteType": row.get("quoteType"),
+            "price": row.get("regularMarketPrice"),
+            "dayChangePct": row.get("regularMarketChangePercent"),
+            "marketCap": row.get("marketCap"),
+            "peRatio": row.get("trailingPE"),
+            "forwardPeRatio": row.get("forwardPE"),
+            "priceToBook": row.get("priceToBook"),
+            "dividendYield": row.get("dividendYield"),
+            "avgVolume3m": row.get("averageDailyVolume3Month"),
+            "week52ChangePct": row.get("fiftyTwoWeekChangePercent"),
+            "analystRating": row.get("averageAnalystRating"),
+            "historyYears": ((now_ms - first_trade) / _MS_PER_YEAR)
+                            if first_trade else None}
+
+
+def filter_established(rows, min_history_years, now_ms):
+    """Pure: parse rows and keep the common equities with at least
+    `min_history_years` of price history. Returns (kept, dropped_counts) so
+    the page can say *why* a screen returned fewer names than Yahoo matched
+    rather than leaving the gap unexplained.
+
+    A row with no listing date is dropped, not kept: the gate exists to
+    require a proven track record, and an unknown listing date is not
+    proof of one."""
+    kept = []
+    dropped = {"nonEquity": 0, "unknownListing": 0, "tooYoung": 0}
+    for row in rows:
+        parsed = parse_screen_row(row, now_ms)
+        # A missing quoteType is tolerated (kept) the same way the FMP
+        # parsers tolerate missing keys; only a positively non-equity
+        # quoteType — an ETF or fund that slipped past the filters — is
+        # dropped as such.
+        if parsed["quoteType"] not in (None, "EQUITY"):
+            dropped["nonEquity"] += 1
+        elif parsed["historyYears"] is None:
+            dropped["unknownListing"] += 1
+        elif parsed["historyYears"] < min_history_years:
+            dropped["tooYoung"] += 1
+        else:
+            kept.append(parsed)
+    return kept, dropped
 
 
 # ---------- Alpha Vantage ----------
